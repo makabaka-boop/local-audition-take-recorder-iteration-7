@@ -1,0 +1,35 @@
+# 试镜采集台 —— 纯前端静态托管
+#
+# 常用命令：
+#   WEB_PORT=8080 docker compose up --build      # 以 8080 端口托管
+#   docker compose up --build                    # 默认 8080 端口
+#   docker compose --profile verify run --rm verify   # 一次性验收（测试+类型检查+构建）
+#
+# 只有 web 服务常驻；verify 是挂在 verify profile 下的一次性任务，
+# 普通 up 不会启动它。
+
+services:
+  web:
+    build:
+      context: .
+      target: web
+    image: audition-capture-bench:latest
+    ports:
+      # 宿主机端口可用环境变量 WEB_PORT 覆盖，容器内固定 80
+      - "${WEB_PORT:-8080}:80"
+    restart: unless-stopped
+
+  # 一次性验收：跑 Vitest（含媒体替身的交错测试）、类型检查与生产构建，
+  # 退出码 0 即验收通过，--rm 退出即销毁，不常驻、不发布端口。
+  # 使用 builder 阶段：其中包含源码与 devDependencies（vitest 等）。
+  verify:
+    profiles: ["verify"]
+    build:
+      context: .
+      target: builder
+    image: audition-capture-bench-verify:latest
+    working_dir: /app
+    command: ["npm", "run", "verify"]
+    # 无网络端口、无卷：验收完全在容器内完成
+    environment:
+      - CI=true
