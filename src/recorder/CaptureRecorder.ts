@@ -2,7 +2,9 @@
  * CaptureRecorder —— 纯前端试镜采集内核
  *
  * 设计要点：
- * 1. take 状态机：idle → starting → recording ⇄ paused → stopping → idle
+ * 1. take 状态机：
+ *    idle → starting（预检取流）→ preview（预检确认）→ starting（录制器启动）
+ *    → recording ⇄ paused → stopping → idle
  *    所有外部操作都做幂等保护，重复调用不会产生副作用。
  * 2. 三种采集模式（av 音视频 / video-only 仅视频 / audio-only 仅音频），
  *    各自按顺序探测一组 MIME；某组全不可用只禁用该模式，不影响其它模式。
@@ -30,6 +32,7 @@
 export type RecorderStatus =
   | 'idle'
   | 'starting'
+  | 'preview'
   | 'recording'
   | 'paused'
   | 'stopping'
@@ -55,6 +58,7 @@ export interface TakeMarker {
 export type MarkerRejectCode =
   | 'not-recording'
   | 'starting'
+  | 'preflight'
   | 'paused'
   | 'stopping'
   | 'label-blank'
@@ -232,19 +236,14 @@ export function pickSupportedMimeType(
   return null
 }
 
-export interface StartOptions {
-  /** 采集模式，缺省 av（兼容无参 start） */
+export interface CapturePlanOptions {
+  /** 采集模式，缺省 av（兼容无参开拍预检） */
   mode?: CaptureMode
   videoDeviceId?: string
   audioDeviceId?: string
   /** 所选设备在枚举清单中的展示名，随计划冻结供本次录制/成片展示 */
   videoDeviceLabel?: string
   audioDeviceLabel?: string
-  /**
-   * 可选的已授权流（UI 取流做预览时复用，避免二次授权弹窗/设备占用）。
-   * 传入时录制器不再自行调用 getUserMedia，但模式/MIME 仍在调用前冻结。
-   */
-  stream?: MediaStreamLike
 }
 
 export interface RecorderCallbacks {
@@ -260,12 +259,23 @@ export interface RecorderCallbacks {
   onSettled: (reason: StopReason, error?: CaptureError) => void
 }
 
-/** 开拍瞬间冻结的采集计划：授权等待期间任何外部操作都改不动它 */
+/** 开拍预检冻结的采集计划：授权等待和预览期间任何外部操作都改不动它 */
 interface FrozenPlan {
   mode: CaptureMode
   mimeType: string
   videoDevice: DeviceRef | null
   audioDevice: DeviceRef | null
+}
+
+/**
+ * 已获得设备授权但尚未创建录制器的预检会话。
+ * 这一阶段只持有预览流和轨道中断监听；确认开拍时把同一 stream 交给
+ * ActiveSession，整个会话只允许 getUserMedia 一次、每条轨道只 stop 一次。
+ */
+interface PreviewSession {
+  session: number
+  stream: MediaStreamLike
+  trackListeners: Array<{ track: MediaStreamTrackLike; listener: () => void }>
 }
 
 interface ActiveSession {
@@ -316,7 +326,8 @@ const MODE_DEVICE_TEXT: Record<CaptureMode, string> = {
 /** 各状态/内容守卫拒绝写入瞬间标记时给用户的明确提示 */
 const MARKER_REJECT_MESSAGE: Record<MarkerRejectCode, string> = {
   paused: '已暂停，不能打标记；继续录制后再标记。',
-  starting: '正在等待设备授权，尚未开始录制，不能打标记。',
+  starting: '正在请求设备或启动录制器，尚未开始录制，不能打标记。',
+  preflight: '仍在开拍预检，确认开拍后才能打标记。',
   stopping: '正在收尾停止，标记已冻结，不能再写入。',
   'not-recording': '当前没有正在录制的 take，不能打标记。',
   'label-blank': '标记内容不能为空，请输入短标签。',
@@ -338,7 +349,11 @@ function codecUnsupportedMessage(mode: CaptureMode): string {
 export class CaptureRecorder {
   private status: RecorderStatus = 'idle'
   private sessionCounter = 0
+  /** 开拍预检/录制会话持有的流：同一代次确认开拍时只转交所有权 */
+  private preview: PreviewSession | null = null
   private active: ActiveSession | null = null
+  /** 资源释放记账：即使 Promise/轨道事件交错，也保证每条轨道只 stop 一次 */
+  private releasedTracks = new WeakSet<MediaStreamTrackLike>()
   /** 开拍时冻结、回到 idle 时清除的采集计划 */
   private plan: FrozenPlan | null = null
   private disposed = false
@@ -369,19 +384,22 @@ export class CaptureRecorder {
     }
   }
 
-  /** 当前进行中（含 starting）冻结的模式；idle 时为 null */
+  /** 当前进行中（含预检/录制）实际冻结的模式；idle 时为 null */
   getActiveMode(): CaptureMode | null {
     return this.active?.mode ?? this.plan?.mode ?? null
   }
 
-  /** 当前进行中（含 starting）冻结的实际 MIME；idle 时为 null */
+  /** 当前进行中（含预检/录制）冻结的实际 MIME；idle 时为 null */
   getActiveMimeType(): string | null {
     return this.active?.mimeType ?? this.plan?.mimeType ?? null
   }
 
-  /** 当前录制会话的流（供 UI 做实时预览）；idle 时为 null */
+  /**
+   * 当前会话的流：预检成功后立即可供 UI 实时预览；确认开拍后不换流，
+   * 只是所有权转交给录制会话。idle / 授权等待时为 null。
+   */
   getActiveStream(): MediaStreamLike | null {
-    return this.active?.stream ?? null
+    return this.active?.stream ?? this.preview?.stream ?? null
   }
 
   /**
@@ -397,10 +415,14 @@ export class CaptureRecorder {
     return this.active?.audioDevice ?? this.plan?.audioDevice ?? null
   }
 
-  start(options: StartOptions = {}): void {
+  /**
+   * 进入开拍预检：在申请权限前冻结模式、MIME 与相关设备身份，然后只申请
+   * 一次 MediaStream。成功后停留在 preview 供界面显示实时预览/输入反馈；
+   * 此时还没有 MediaRecorder，故绝不可能产生可交付 take。
+   */
+  beginPreflight(options: CapturePlanOptions = {}): void {
     if (this.disposed) return
-    // 重复 start：除 idle 外一律忽略（starting 中等待授权时的双击也被挡下，
-    // 冻结的计划不会被第二次调用改写）
+    // 只有 idle 能开启新预检；starting/preview/录制中重复调用一律忽略。
     if (this.status !== 'idle') return
 
     // 模式与 MIME 在申请权限之前冻结：本模式无可用编码时根本不取设备，
@@ -414,60 +436,20 @@ export class CaptureRecorder {
       return
     }
 
-    // 只冻结本模式实际会用到的设备：不相关的设备选择一律不进入计划。
-    // deviceId 与展示名同时冻结：授权等待/录制期间热插拔或迟到枚举，
-    // 都既改不动取流约束，也改不动本次录制显示的设备名称。
-    const videoDevice: DeviceRef | null =
-      mode === 'audio-only'
-        ? null
-        : {
-            id: (options.videoDeviceId ?? '') || '',
-            label: options.videoDeviceLabel ?? '',
-          }
-    const audioDevice: DeviceRef | null =
-      mode === 'video-only'
-        ? null
-        : {
-            id: (options.audioDeviceId ?? '') || '',
-            label: options.audioDeviceLabel ?? '',
-          }
-
+    const plan = this.buildPlan(options, mode, mimeType)
     const session = ++this.sessionCounter
-    this.plan = { mode, mimeType, videoDevice, audioDevice }
+    this.plan = plan
     // 先进入 starting 完成冻结，随后才申请权限
     this.setStatus('starting')
 
-    // UI 已取到授权流（预览复用）：直接装配，避免二次授权弹窗/设备占用
-    if (options.stream) {
-      this.attachStream(session, options.stream)
-      return
-    }
-
-    // 采集计划只请求所需轨道：缺少无关设备（如仅视频时没有麦克风）
-    // 不会形成约束，自然不算失败
-    const videoId = videoDevice?.id ?? ''
-    const audioId = audioDevice?.id ?? ''
-    const constraints: MediaStreamConstraints = {
-      video:
-        mode === 'audio-only'
-          ? false
-          : videoId
-            ? { deviceId: { exact: videoId } }
-            : true,
-      audio:
-        mode === 'video-only'
-          ? false
-          : audioId
-            ? { deviceId: { exact: audioId } }
-            : true,
-    }
-
     this.deps
-      .getUserMedia(constraints)
-      .then((stream) => this.attachStream(session, stream))
+      .getUserMedia(this.buildConstraints(plan, mode))
+      .then((stream) => this.attachPreviewStream(session, stream))
       .catch((err: unknown) => {
-        if (this.disposed || session !== this.sessionCounter) return
-        this.active = null
+        // 用户取消预检、发起新一代预检或卸载后，迟到的拒绝只按代次丢弃；
+        // 此时没有本次流可释放，也不能覆盖新会话的错误。
+        if (this.disposed || session !== this.sessionCounter || !this.plan) return
+        this.preview = null
         this.setStatus('idle')
         const name = errorName(err)
         const denied = name === 'NotAllowedError' || name === 'SecurityError'
@@ -481,30 +463,37 @@ export class CaptureRecorder {
       })
   }
 
-  /** 拿到流后的统一装配路径：按冻结计划构造 recorder、挂事件、start */
-  private attachStream(session: number, stream: MediaStreamLike): void {
-    // 授权返回期间用户可能已停止或卸载；迟到的 stream 必须立即释放
-    if (this.disposed || session !== this.sessionCounter || !this.plan) {
-      stream.getTracks().forEach((track) => track.stop())
-      return
-    }
+  /**
+   * 确认预检画面和输入反馈无误后正式开拍：复用预检会话的同一个
+   * MediaStream 构造并启动 MediaRecorder，不再调用 getUserMedia。
+   * 成功后流的所有权从预检会话转交给录制会话；失败则由本方法释放这一次
+   * 持有的流，且不触碰历史 take。
+   */
+  confirmStart(): void {
+    if (this.disposed || this.status !== 'preview') return
+    const preview = this.preview
     const plan = this.plan
-    const mimeType = plan.mimeType
+    if (!preview || !plan) return
 
+    const { session, stream } = preview
+    // 先摘除预检中断监听；下面会为录制会话重新挂载。这里不能 stop 轨道。
+    this.removeTrackListeners(preview.trackListeners)
+    preview.trackListeners = []
+
+    // 仍以 preview 状态完成同步构造：构造失败直接回 idle，避免界面进入
+    // “启动中”却没有可归属的有效会话/流。
     let recorder: MediaRecorderLike
     try {
-      recorder = new this.deps.MediaRecorder(stream, { mimeType })
+      recorder = new this.deps.MediaRecorder(stream, {
+        mimeType: plan.mimeType,
+      })
     } catch (err) {
-      stream.getTracks().forEach((track) => track.stop())
-      if (session === this.sessionCounter && !this.disposed) {
-        this.setStatus('idle')
-        this.emitError(
-          new CaptureError(
-            'start-failed',
-            `录制器初始化失败：${messageOf(err)}`,
-          ),
-        )
-      }
+      this.preview = null
+      this.releaseStreamOnce(stream)
+      this.setStatus('idle')
+      this.emitError(
+        new CaptureError('start-failed', `录制器初始化失败：${messageOf(err)}`),
+      )
       return
     }
 
@@ -514,7 +503,7 @@ export class CaptureRecorder {
       mode: plan.mode,
       recorder,
       stream,
-      mimeType: recorder.mimeType || mimeType,
+      mimeType: recorder.mimeType || plan.mimeType,
       videoDevice: plan.videoDevice,
       audioDevice: plan.audioDevice,
       chunks: [],
@@ -533,6 +522,9 @@ export class CaptureRecorder {
       trackListeners: [],
     }
     this.active = next
+    // 会话对象已接管 stream 后才离开 preview；starting 回调也能读到同一流。
+    this.preview = null
+    this.setStatus('starting')
 
     recorder.ondataavailable = (event) => {
       // 会话守卫：旧 take 的事件永不影响新 take
@@ -573,6 +565,98 @@ export class CaptureRecorder {
     }
 
     this.setStatus('recording')
+  }
+
+  /** 按当前选择构造计划；设备 id 与展示名一起冻结。 */
+  private buildPlan(
+    options: CapturePlanOptions,
+    mode: CaptureMode,
+    mimeType: string,
+  ): FrozenPlan {
+    // 只冻结本模式实际会用到的设备：不相关的设备选择一律不进入计划。
+    const videoDevice: DeviceRef | null =
+      mode === 'audio-only'
+        ? null
+        : {
+            id: (options.videoDeviceId ?? '') || '',
+            label: options.videoDeviceLabel ?? '',
+          }
+    const audioDevice: DeviceRef | null =
+      mode === 'video-only'
+        ? null
+        : {
+            id: (options.audioDeviceId ?? '') || '',
+            label: options.audioDeviceLabel ?? '',
+          }
+    return { mode, mimeType, videoDevice, audioDevice }
+  }
+
+  /** 采集计划只请求所需轨道：缺少无关设备不会形成约束。 */
+  private buildConstraints(
+    plan: FrozenPlan,
+    mode: CaptureMode,
+  ): MediaStreamConstraints {
+    const videoId = plan.videoDevice?.id ?? ''
+    const audioId = plan.audioDevice?.id ?? ''
+    return {
+      video:
+        mode === 'audio-only'
+          ? false
+          : videoId
+            ? { deviceId: { exact: videoId } }
+            : true,
+      audio:
+        mode === 'video-only'
+          ? false
+          : audioId
+            ? { deviceId: { exact: audioId } }
+            : true,
+    }
+  }
+
+  /** 预检取流返回后的装配路径：只挂轨道中断监听，不创建录制器。 */
+  private attachPreviewStream(
+    session: number,
+    stream: MediaStreamLike,
+  ): void {
+    // 授权返回期间用户可能已取消、改模式/设备发起新一代预检或卸载；
+    // 迟到的 stream 必须立即释放且只由当前裁决获胜的代次释放。
+    if (this.disposed || session !== this.sessionCounter || !this.plan) {
+      this.releaseStreamOnce(stream)
+      return
+    }
+
+    const tracks = stream.getTracks()
+    if (tracks.some((track) => track.readyState === 'ended')) {
+      this.releaseStreamOnce(stream)
+      this.setStatus('idle')
+      this.emitError(
+        new CaptureError('start-failed', '设备在预检开始前已结束，请重新检查设备。'),
+      )
+      return
+    }
+
+    const preview: PreviewSession = { session, stream, trackListeners: [] }
+    for (const track of tracks) {
+      const listener = () => {
+        if (this.disposed || this.preview?.session !== session) return
+        // 预检阶段轨道提前结束：本次预检确定失败，释放同一份流，不产生 take。
+        this.teardownPreview(preview)
+        this.preview = null
+        this.setStatus('idle')
+        this.emitError(
+          new CaptureError(
+            'start-failed',
+            `${track.kind === 'video' ? '摄像头' : '麦克风'}在开拍前断开，请重新预检。`,
+          ),
+        )
+      }
+      track.addEventListener('ended', listener)
+      preview.trackListeners.push({ track, listener })
+    }
+
+    this.preview = preview
+    this.setStatus('preview')
   }
 
   pause(): void {
@@ -623,11 +707,13 @@ export class CaptureRecorder {
       const reason: MarkerRejectCode =
         this.status === 'paused'
           ? 'paused'
-          : this.status === 'starting'
-            ? 'starting'
-            : this.status === 'stopping'
-              ? 'stopping'
-              : 'not-recording'
+          : this.status === 'preview'
+            ? 'preflight'
+            : this.status === 'starting'
+              ? 'starting'
+              : this.status === 'stopping'
+                ? 'stopping'
+                : 'not-recording'
       return this.rejectMarker(reason)
     }
     const a = this.active
@@ -657,16 +743,21 @@ export class CaptureRecorder {
 
   /**
    * 用户停止；重复调用安全，停止中的再次调用无效。
-   * starting（授权弹窗未决）时语义为“取消本次开拍”：不产生任何成片、
-   * 不释放任何轨道（流尚未拿到），直接回 idle 并令 session 失效；
-   * 迟到的授权结果由会话守卫释放其流后丢弃。
+   * starting（授权弹窗未决）/ preview（预检画面确认前）时语义均为“取消”：
+   * 不产生任何成片。starting 还没有流，只作废旧代次；preview 立即释放本次
+   * 预检流一次。迟到的授权结果由会话代次裁决，绝不能进入新会话。
    */
   stop(): void {
     if (this.disposed) return
-    // 授权未决：取消本次开拍。设备尚被浏览器弹窗占用、流尚未返回，
+    // 授权未决：取消本次预检。设备尚被浏览器弹窗占用、流尚未返回，
     // 这里没有轨道可释放；让 session 立即作废即可解锁模式/设备切换。
     if (this.status === 'starting') {
       this.cancelStarting()
+      return
+    }
+    // 已拿到预览流但尚未确认开拍：明确取消旧预检并释放本次轨道。
+    if (this.status === 'preview') {
+      this.cancelPreview()
       return
     }
     const a = this.active
@@ -674,11 +765,15 @@ export class CaptureRecorder {
     this.requestStop(a, 'user')
   }
 
-  /** 卸载：释放轨道，不产生 take（成片本就只在内存） */
+  /** 卸载：释放预检/录制轨道，不产生 take（成片本就只在内存） */
   dispose(): void {
     this.disposed = true
     // 授权未决时卸载：作废 session，迟到的授权结果只会释放其流
-    if (!this.active && this.plan) this.plan = null
+    if (this.preview) {
+      this.teardownPreview(this.preview)
+      this.preview = null
+    }
+    this.plan = null
     const a = this.active
     if (a) this.teardownSession(a)
     this.active = null
@@ -687,10 +782,23 @@ export class CaptureRecorder {
 
   // ---- 内部 ----
 
-  /** 取消等待授权的开拍：确定结局是“取消”——无成片、无错误、回 idle */
+  /** 取消等待授权的预检：确定结局是“取消”——无成片、无错误、回 idle */
   private cancelStarting(): void {
     // 作废自增 session：迟到的 grant/deny 与迟到的流全部失效
     this.sessionCounter++
+    this.preview = null
+    this.plan = null
+    this.setStatus('idle')
+  }
+
+  /** 取消已显示预览的预检：释放本次持有的同一份流，无成片、无错误。 */
+  private cancelPreview(): void {
+    const preview = this.preview
+    if (!preview) return
+    // 先推进代次，防止正在派发的轨道事件/极端重入再次裁决同一资源。
+    this.sessionCounter++
+    this.teardownPreview(preview)
+    this.preview = null
     this.plan = null
     this.setStatus('idle')
   }
@@ -847,6 +955,34 @@ export class CaptureRecorder {
     this.callbacks.onSettled(reason)
   }
 
+  private removeTrackListeners(
+    trackListeners: Array<{ track: MediaStreamTrackLike; listener: () => void }>,
+  ): void {
+    for (const { track, listener } of trackListeners) {
+      track.removeEventListener('ended', listener)
+    }
+    trackListeners.length = 0
+  }
+
+  /**
+   * 释放一份流的全部轨道。WeakSet 是跨预检/录制代次的释放记账：
+   * 同一份流从预检转交给录制器时不会提前 stop；取消、启动失败、卸载、
+   * 迟到授权与轨道 ended 交错时，最终每条轨道也只会 stop 一次。
+   */
+  private releaseStreamOnce(stream: MediaStreamLike): void {
+    for (const track of stream.getTracks()) {
+      if (this.releasedTracks.has(track)) continue
+      this.releasedTracks.add(track)
+      track.stop()
+    }
+  }
+
+  /** 拆除预检监听并释放流；确认开拍时不能调用它（只摘除监听、保留流）。 */
+  private teardownPreview(preview: PreviewSession): void {
+    this.removeTrackListeners(preview.trackListeners)
+    this.releaseStreamOnce(preview.stream)
+  }
+
   private teardownSession(a: ActiveSession): void {
     if (a.stopTimer !== null) {
       this.deps.clearTimer(a.stopTimer)
@@ -855,13 +991,8 @@ export class CaptureRecorder {
     a.recorder.ondataavailable = null
     a.recorder.onstop = null
     a.recorder.onerror = null
-    for (const { track, listener } of a.trackListeners) {
-      track.removeEventListener('ended', listener)
-    }
-    a.trackListeners = []
-    for (const track of a.stream.getTracks()) {
-      track.stop()
-    }
+    this.removeTrackListeners(a.trackListeners)
+    this.releaseStreamOnce(a.stream)
   }
 
   private setStatus(status: RecorderStatus): void {

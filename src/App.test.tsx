@@ -94,7 +94,10 @@ async function shootAndStop(modeLabel?: string) {
     })
   }
   await act(async () => {
-    fireEvent.click(screen.getByRole('button', { name: '开始 take' }))
+    fireEvent.click(screen.getByRole('button', { name: '检查设备' }))
+  })
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: '确认开拍' }))
   })
   const rec = FakeMediaRecorder.instances[
     FakeMediaRecorder.instances.length - 1
@@ -145,7 +148,7 @@ describe('下载交付版一致性', () => {
     render(<App />)
     await waitFor(() =>
       expect(
-        (screen.getByRole('button', { name: '开始 take' }) as HTMLButtonElement)
+        (screen.getByRole('button', { name: '检查设备' }) as HTMLButtonElement)
           .disabled,
       ).toBe(false),
     )
@@ -220,7 +223,7 @@ describe('模式切换与 MIME 能力隔离（UI）', () => {
     render(<App />)
     await waitFor(() =>
       expect(
-        (screen.getByRole('button', { name: '开始 take' }) as HTMLButtonElement)
+        (screen.getByRole('button', { name: '检查设备' }) as HTMLButtonElement)
           .disabled,
       ).toBe(false),
     )
@@ -238,12 +241,12 @@ describe('模式切换与 MIME 能力隔离（UI）', () => {
     expect((avRadio as HTMLInputElement).checked).toBe(true)
 
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: '开始 take' }))
+      fireEvent.click(screen.getByRole('button', { name: '检查设备' }))
     })
     // 已进入 starting：模式/设备/开拍按钮全部冻结
     expect(
       (
-        screen.getByRole('button', { name: '开始 take' }) as HTMLButtonElement
+        screen.getByRole('button', { name: '检查设备' }) as HTMLButtonElement
       ).disabled,
     ).toBe(true)
     expect((avRadio as HTMLInputElement).disabled).toBe(true)
@@ -252,12 +255,15 @@ describe('模式切换与 MIME 能力隔离（UI）', () => {
 
     // 授权等待期间点击无效
     fireEvent.click(audioRadio)
-    fireEvent.click(screen.getByRole('button', { name: '开始 take' }))
+    fireEvent.click(screen.getByRole('button', { name: '检查设备' }))
     expect(g.getUserMedia).toHaveBeenCalledTimes(1)
 
     await act(async () => {
       g.grant()
       await Promise.resolve()
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '确认开拍' }))
     })
     const rec = FakeMediaRecorder.instances[
       FakeMediaRecorder.instances.length - 1
@@ -294,7 +300,7 @@ describe('模式切换与 MIME 能力隔离（UI）', () => {
     expect((videoRadio as HTMLInputElement).disabled).toBe(true)
     expect((audioRadio as HTMLInputElement).disabled).toBe(false)
     expect(
-      (screen.getByRole('button', { name: '开始 take' }) as HTMLButtonElement)
+      (screen.getByRole('button', { name: '检查设备' }) as HTMLButtonElement)
         .disabled,
     ).toBe(true)
 
@@ -303,14 +309,17 @@ describe('模式切换与 MIME 能力隔离（UI）', () => {
     await waitFor(() =>
       expect(
         (
-          screen.getByRole('button', { name: '开始 take' }) as HTMLButtonElement
+          screen.getByRole('button', { name: '检查设备' }) as HTMLButtonElement
         ).disabled,
       ).toBe(false),
     )
     expect(screen.getByText('audio/webm')).toBeTruthy()
 
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: '开始 take' }))
+      fireEvent.click(screen.getByRole('button', { name: '检查设备' }))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '确认开拍' }))
     })
     const rec = FakeMediaRecorder.instances[
       FakeMediaRecorder.instances.length - 1
@@ -336,14 +345,17 @@ describe('模式切换与 MIME 能力隔离（UI）', () => {
     render(<App />)
     await waitFor(() =>
       expect(
-        (screen.getByRole('button', { name: '开始 take' }) as HTMLButtonElement)
+        (screen.getByRole('button', { name: '检查设备' }) as HTMLButtonElement)
           .disabled,
       ).toBe(false),
     )
 
     fireEvent.click(screen.getByRole('radio', { name: /仅视频/ }))
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: '开始 take' }))
+      fireEvent.click(screen.getByRole('button', { name: '检查设备' }))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '确认开拍' }))
     })
     // 无错误提示、无授权弹窗残留：audio:false 直接成功
     expect(screen.queryByRole('alert')).toBeNull()
@@ -416,19 +428,19 @@ describe('授权未决时取消（UI）', () => {
     render(<App />)
     await waitFor(() =>
       expect(
-        (screen.getByRole('button', { name: '开始 take' }) as HTMLButtonElement)
+        (screen.getByRole('button', { name: '检查设备' }) as HTMLButtonElement)
           .disabled,
       ).toBe(false),
     )
 
     fireEvent.click(screen.getByRole('radio', { name: /仅音频/ }))
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: '开始 take' }))
+      fireEvent.click(screen.getByRole('button', { name: '检查设备' }))
     })
     expect(g.pending).toHaveLength(1)
 
     // 停止入口在授权未决时可用并呈现“取消”
-    const cancelBtn = screen.getByRole('button', { name: '取消本次开拍' })
+    const cancelBtn = screen.getByRole('button', { name: '取消预检' })
     expect((cancelBtn as HTMLButtonElement).disabled).toBe(false)
 
     await act(async () => {
@@ -442,7 +454,7 @@ describe('授权未决时取消（UI）', () => {
     ).toHaveLength(0)
     await waitFor(() =>
       expect(
-        (screen.getByRole('button', { name: '开始 take' }) as HTMLButtonElement)
+        (screen.getByRole('button', { name: '检查设备' }) as HTMLButtonElement)
           .disabled,
       ).toBe(false),
     )
@@ -461,9 +473,12 @@ describe('授权未决时取消（UI）', () => {
 
     fireEvent.click(screen.getByRole('radio', { name: /音视频/ }))
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: '开始 take' }))
+      fireEvent.click(screen.getByRole('button', { name: '检查设备' }))
       g.grant()
       await Promise.resolve()
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '确认开拍' }))
     })
     const rec = FakeMediaRecorder.instances[
       FakeMediaRecorder.instances.length - 1

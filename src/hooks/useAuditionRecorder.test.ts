@@ -141,7 +141,8 @@ async function shoot(
   content = 'x',
 ) {
   await act(async () => {
-    await result.current.start()
+    await result.current.beginPreflight()
+    result.current.confirmStart()
   })
   const rec = FakeMediaRecorder.instances[
     FakeMediaRecorder.instances.length - 1
@@ -160,8 +161,10 @@ describe('useAuditionRecorder', () => {
   it('挂载即枚举设备并识别三模式编码，默认音视频且可开拍', async () => {
     const api = installGlobals({})
     const { result } = renderHook(() => useAuditionRecorder())
-    await waitFor(() => expect(api.enumerateDevices).toHaveBeenCalled())
-    expect(result.current.videoDeviceId).toBe('cam1')
+    await waitFor(() => {
+      expect(api.enumerateDevices).toHaveBeenCalled()
+      expect(result.current.videoDeviceId).toBe('cam1')
+    })
     expect(result.current.audioDeviceId).toBe('mic1')
     expect(result.current.mode).toBe('av')
     expect(result.current.mimeByMode).toEqual({
@@ -183,7 +186,7 @@ describe('useAuditionRecorder', () => {
     await waitFor(() => expect(api.enumerateDevices).toHaveBeenCalled())
 
     await act(async () => {
-      await result.current.start()
+      await result.current.beginPreflight()
     })
     expect(result.current.error?.code).toBe('permission-denied')
     expect(result.current.status).toBe('idle')
@@ -196,7 +199,8 @@ describe('useAuditionRecorder', () => {
     await waitFor(() => expect(result.current.status).toBe('idle'))
 
     await act(async () => {
-      await result.current.start()
+      await result.current.beginPreflight()
+      result.current.confirmStart()
     })
     expect(result.current.status).toBe('recording')
     expect(result.current.canSwitchDevice).toBe(false)
@@ -265,7 +269,7 @@ describe('useAuditionRecorder', () => {
       throw new DOMException('denied', 'NotAllowedError')
     })
     await act(async () => {
-      await result.current.start()
+      await result.current.beginPreflight()
     })
 
     expect(result.current.error?.code).toBe('permission-denied')
@@ -285,7 +289,8 @@ describe('useAuditionRecorder', () => {
       'InvalidStateError',
     )
     await act(async () => {
-      await result.current.start()
+      await result.current.beginPreflight()
+      result.current.confirmStart()
     })
 
     expect(result.current.error?.code).toBe('start-failed')
@@ -319,7 +324,7 @@ describe('停止落定的确定性结局（hook 集成）', () => {
     expect(result.current.canStart).toBe(true)
 
     await act(async () => {
-      result.current.start()
+      result.current.beginPreflight()
     })
     expect(result.current.status).toBe('starting')
 
@@ -340,9 +345,10 @@ describe('停止落定的确定性结局（hook 集成）', () => {
 
     // 立即重拍成功
     await act(async () => {
-      result.current.start()
+      result.current.beginPreflight()
       g.grant()
       await Promise.resolve()
+      result.current.confirmStart()
     })
     expect(result.current.status).toBe('recording')
   })
@@ -354,7 +360,8 @@ describe('停止落定的确定性结局（hook 集成）', () => {
     expect(result.current.canStart).toBe(true)
 
     await act(async () => {
-      await result.current.start()
+      await result.current.beginPreflight()
+      result.current.confirmStart()
     })
     const rec = FakeMediaRecorder.instances[
       FakeMediaRecorder.instances.length - 1
@@ -384,7 +391,8 @@ describe('停止落定的确定性结局（hook 集成）', () => {
 
     // 后续录制不再被阻塞
     await act(async () => {
-      await result.current.start()
+      await result.current.beginPreflight()
+      result.current.confirmStart()
     })
     expect(result.current.status).toBe('recording')
   })
@@ -454,7 +462,7 @@ describe('开拍冻结（hook/UI 层）', () => {
 
     act(() => result.current.setMode('video-only'))
     await act(async () => {
-      result.current.start()
+      result.current.beginPreflight()
     })
     expect(result.current.status).toBe('starting')
     expect(result.current.activeMode).toBe('video-only')
@@ -463,8 +471,8 @@ describe('开拍冻结（hook/UI 层）', () => {
 
     // 授权弹窗未决：重复开始
     await act(async () => {
-      result.current.start()
-      result.current.start()
+      result.current.beginPreflight()
+      result.current.beginPreflight()
     })
     expect(g.pending).toHaveLength(1)
 
@@ -491,6 +499,8 @@ describe('开拍冻结（hook/UI 层）', () => {
       g.grant()
       await Promise.resolve()
     })
+    expect(result.current.status).toBe('preview')
+    act(() => result.current.confirmStart())
     expect(result.current.status).toBe('recording')
     const rec = FakeMediaRecorder.instances[
       FakeMediaRecorder.instances.length - 1
@@ -518,7 +528,7 @@ describe('开拍冻结（hook/UI 层）', () => {
     await waitFor(() => expect(result.current.canStart).toBe(true))
 
     await act(async () => {
-      result.current.start() // 默认 av
+      result.current.beginPreflight() // 默认 av
     })
     expect(g.pending[0].constraints).toEqual({
       video: { deviceId: { exact: 'cam1' } },
@@ -526,7 +536,7 @@ describe('开拍冻结（hook/UI 层）', () => {
     })
     act(() => result.current.setMode('audio-only'))
     await act(async () => {
-      result.current.start()
+      result.current.beginPreflight()
     })
     expect(g.getUserMedia).toHaveBeenCalledTimes(1)
     expect(g.pending[0].constraints).toEqual({
@@ -538,6 +548,7 @@ describe('开拍冻结（hook/UI 层）', () => {
       g.grant()
       await Promise.resolve()
     })
+    act(() => result.current.confirmStart())
     const rec = FakeMediaRecorder.instances[
       FakeMediaRecorder.instances.length - 1
     ]
@@ -550,9 +561,10 @@ describe('开拍冻结（hook/UI 层）', () => {
 
     // 先成片一条 av
     await act(async () => {
-      result.current.start()
+      result.current.beginPreflight()
       g.grant()
       await Promise.resolve()
+      result.current.confirmStart()
     })
     const rec1 = FakeMediaRecorder.instances[
       FakeMediaRecorder.instances.length - 1
@@ -569,7 +581,7 @@ describe('开拍冻结（hook/UI 层）', () => {
     // 第二次仅音频，授权被拒
     act(() => result.current.setMode('audio-only'))
     await act(async () => {
-      result.current.start()
+      result.current.beginPreflight()
     })
     expect(result.current.status).toBe('starting')
     await act(async () => {
@@ -594,8 +606,9 @@ describe('只取所需轨道：麦克风不可用的仅视频', () => {
 
     act(() => result.current.setMode('video-only'))
     await act(async () => {
-      await result.current.start()
+      await result.current.beginPreflight()
     })
+    act(() => result.current.confirmStart())
     expect(result.current.error).toBeNull()
     expect(result.current.status).toBe('recording')
     expect(g.getUserMedia).toHaveBeenCalledWith({
@@ -630,7 +643,8 @@ describe('只取所需轨道：麦克风不可用的仅视频', () => {
     await waitFor(() => expect(result.current.canStart).toBe(true))
     act(() => result.current.setMode('audio-only'))
     await act(async () => {
-      await result.current.start()
+      await result.current.beginPreflight()
+      result.current.confirmStart()
     })
     expect(result.current.status).toBe('recording')
     expect(g.getUserMedia).toHaveBeenCalledWith({

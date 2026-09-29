@@ -13,6 +13,7 @@ import {
 const STATUS_TEXT: Record<RecorderStatus, string> = {
   idle: '空闲',
   starting: '正在请求设备…',
+  preview: '预检中',
   recording: '录制中',
   paused: '已暂停',
   stopping: '正在收尾…',
@@ -95,7 +96,8 @@ function formatMarkerTime(ms: number): string {
 
 /** 非录制状态下“为什么此刻不能打标记”的明确提示（与内核拒绝文案呼应） */
 const MARKER_BLOCKED_HINT: Partial<Record<RecorderStatus, string>> = {
-  starting: '正在等待设备授权，授权后开始录制才可打标记。',
+  starting: '正在请求设备或启动录制器，正式开始录制后才可打标记。',
+  preview: '仍在开拍预检；确认画面和麦克风正常后，点“确认开拍”再打标记。',
   paused: '已暂停，不能打标记；继续录制后再标记。',
   stopping: '正在收尾停止，标记已随本 take 冻结。',
   idle: '当前没有正在录制的 take，开始录制后才可打标记。',
@@ -130,6 +132,111 @@ function Preview({ stream }: { stream: MediaStream | null }) {
       playsInline
       autoPlay
     />
+  )
+}
+
+type AudioAnalyserWindow = Window & {
+  AudioContext?: typeof AudioContext
+  webkitAudioContext?: typeof AudioContext
+}
+
+/**
+ * 预检时的麦克风输入反馈。只连接到 AnalyserNode（不接扬声器），避免啸叫；
+ * 测试或不支持 Web Audio 的环境降级为“麦克风已接通”，不影响同流交接。
+ */
+function AudioMeter({ stream, active }: { stream: MediaStream | null; active: boolean }) {
+  const [level, setLevel] = useState(0)
+  const [supported, setSupported] = useState(true)
+
+  useEffect(() => {
+    if (!stream || !active) {
+      setLevel(0)
+      setSupported(true)
+      return
+    }
+    setLevel(0)
+    setSupported(true)
+    const audioTracks = stream.getAudioTracks?.() ?? []
+    if (audioTracks.length === 0) {
+      setSupported(false)
+      return
+    }
+
+    const w = window as AudioAnalyserWindow
+    const Ctor = w.AudioContext ?? w.webkitAudioContext
+    if (!Ctor || !('createMediaStreamSource' in AudioContext.prototype)) {
+      setSupported(false)
+      return
+    }
+
+    let context: AudioContext | null = null
+    let analyser: AnalyserNode | null = null
+    let source: MediaStreamAudioSourceNode | null = null
+    let raf = 0
+    let cancelled = false
+
+    try {
+      context = new Ctor()
+      source = context.createMediaStreamSource(stream)
+      analyser = context.createAnalyser()
+      analyser.fftSize = 256
+      source.connect(analyser)
+      const sample = new Uint8Array(analyser.fftSize)
+
+      const tick = () => {
+        if (cancelled || !analyser || !context) return
+        analyser.getByteTimeDomainData(sample)
+        let peak = 0
+        for (const value of sample) {
+          const amplitude = Math.abs(value - 128) / 128
+          if (amplitude > peak) peak = amplitude
+        }
+        setLevel(peak)
+        raf = requestAnimationFrame(tick)
+      }
+      tick()
+    } catch {
+      setSupported(false)
+    }
+
+    return () => {
+      cancelled = true
+      cancelAnimationFrame(raf)
+      try {
+        source?.disconnect()
+      } catch {
+        // jsdom/部分实现没有真实音频图，忽略
+      }
+      if (context && context.state !== 'closed') {
+        void context.close().catch(() => undefined)
+      }
+    }
+  }, [stream, active])
+
+  const percent = Math.min(100, Math.round(level * 100))
+  return (
+    <div className="audio-meter" data-audio-meter data-audio-ready="true">
+      <span className="audio-meter-label">麦克风输入</span>
+      {supported ? (
+        <>
+          <div
+            className="audio-meter-track"
+            role="meter"
+            aria-label="麦克风输入音量"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={percent}
+          >
+            <span className="audio-meter-fill" style={{ width: `${Math.max(4, percent)}%` }} />
+          </div>
+          <span className="audio-meter-state">
+            {level > 0.02 ? '检测到声音' : '麦克风已接通，请试音'}
+          </span>
+        </>
+      ) : (
+        <span className="audio-meter-state">麦克风已接通</span>
+      )}
+    </div>
   )
 }
 
@@ -387,7 +494,11 @@ export default function App() {
     canMark,
     liveMarkers,
     liveStream,
-    start,
+    beginPreflight,
+    confirmStart,
+    canConfirmStart,
+    canCancel,
+    canStop,
     pause,
     resume,
     stop,
@@ -416,12 +527,8 @@ export default function App() {
     selectedId: audioDeviceId,
   })
 
-  const startingText =
-    displayMode === 'audio-only'
-      ? '正在请求麦克风…'
-      : displayMode === 'video-only'
-        ? '正在请求摄像头…'
-        : '正在请求摄像头与麦克风…'
+  const displayStatusText =
+    status === 'starting' && liveStream ? '正在启动录制…' : STATUS_TEXT[status]
 
   return (
     <main className="app">
@@ -436,18 +543,35 @@ export default function App() {
         <div className="preview-wrap">
           {liveStream && needsVideo ? (
             <Preview stream={liveStream} />
+          ) : liveStream && needsAudio ? (
+            <div className="preview audio-placeholder" data-audio-preview>
+              <span className="audio-preview-icon">♫</span>
+              <strong>仅音频预检</strong>
+              <AudioMeter stream={liveStream} active={!!liveStream} />
+            </div>
           ) : (
             <div className="preview placeholder">
               {status === 'starting'
-                ? startingText
+                ? liveStream
+                  ? '正在启动录制…'
+                  : displayMode === 'audio-only'
+                    ? '正在请求麦克风…'
+                    : displayMode === 'video-only'
+                      ? '正在请求摄像头…'
+                      : '正在请求摄像头与麦克风…'
                 : displayMode === 'audio-only'
-                  ? '仅音频模式：授权后开始采集声音'
-                  : '授权后开始采集画面'}
+                  ? '检查设备后将显示麦克风输入反馈'
+                  : '检查设备后将显示实时画面'}
+            </div>
+          )}
+          {liveStream && needsVideo && needsAudio && (
+            <div className="preview-audio-overlay">
+              <AudioMeter stream={liveStream} active={!!liveStream} />
             </div>
           )}
           <div className={`status-badge status-${status}`}>
             <span className="status-dot" />
-            {STATUS_TEXT[status]}
+            {displayStatusText}
           </div>
         </div>
 
@@ -480,7 +604,7 @@ export default function App() {
               })}
             </div>
             {!canSwitchDevice && (
-              <p className="hint">模式已随开拍冻结；停止后才可切换。</p>
+              <p className="hint">模式已随预检冻结；取消预检或停止录制后才可切换。</p>
             )}
           </fieldset>
 
@@ -551,7 +675,7 @@ export default function App() {
 
           {!canSwitchDevice && (
             <div className="locked-devices" data-locked-devices>
-              <p className="hint">录制进行中，设备已锁定；停止后才可切换。</p>
+              <p className="hint">预检/录制进行中，设备已锁定；取消预检或停止后才可切换。</p>
               <p className="locked-device-line">
                 本次实际采集：
                 {needsVideo && (
@@ -579,14 +703,29 @@ export default function App() {
             )}
           </div>
 
+          {status === 'preview' && (
+            <div className="preflight-banner" role="status" data-preflight>
+              预检中：请确认画面和麦克风输入正常。确认开拍将继续使用这一条流，不会重新请求设备。
+            </div>
+          )}
+
           <div className="button-row">
             <button
               type="button"
               className="btn btn-start"
-              onClick={() => start()}
+              onClick={() => beginPreflight()}
               disabled={!canStart}
             >
-              开始 take
+              检查设备
+            </button>
+            <button
+              type="button"
+              className="btn btn-confirm"
+              onClick={() => confirmStart()}
+              disabled={!canConfirmStart}
+              data-confirm-start
+            >
+              确认开拍
             </button>
             <button
               type="button"
@@ -608,12 +747,10 @@ export default function App() {
               type="button"
               className="btn btn-stop"
               onClick={stop}
-              disabled={
-                status === 'idle' || status === 'stopping'
-              }
-              aria-label={status === 'starting' ? '取消本次开拍' : '停止'}
+              disabled={!canStop}
+              aria-label={canCancel ? '取消预检' : '停止'}
             >
-              {status === 'starting' ? '取消' : '停止'}
+              {canCancel ? '取消' : '停止'}
             </button>
           </div>
 

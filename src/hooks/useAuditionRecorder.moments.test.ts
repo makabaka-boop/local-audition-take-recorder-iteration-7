@@ -70,13 +70,15 @@ async function startRecording(
   result: { current: ReturnType<typeof useAuditionRecorder> },
   g: ReturnType<typeof installGlobals>,
 ) {
-  act(() => result.current.start())
+  act(() => result.current.beginPreflight())
   expect(result.current.status).toBe('starting')
   await act(async () => {
     g.grant()
     await Promise.resolve()
     await Promise.resolve()
   })
+  expect(result.current.status).toBe('preview')
+  act(() => result.current.confirmStart())
   expect(result.current.status).toBe('recording')
   return FakeMediaRecorder.instances[
     FakeMediaRecorder.instances.length - 1
@@ -115,7 +117,7 @@ describe('useAuditionRecorder 瞬间标记', () => {
     expect(result.current.status).toBe('idle')
     expect(result.current.canMark).toBe(false)
 
-    act(() => result.current.start())
+    act(() => result.current.beginPreflight())
     expect(result.current.status).toBe('starting')
     expect(result.current.canMark).toBe(false)
 
@@ -123,6 +125,9 @@ describe('useAuditionRecorder 瞬间标记', () => {
       g.grant()
       await Promise.resolve()
     })
+    expect(result.current.status).toBe('preview')
+    expect(result.current.canMark).toBe(false)
+    act(() => result.current.confirmStart())
     expect(result.current.status).toBe('recording')
     expect(result.current.canMark).toBe(true)
 
@@ -186,15 +191,20 @@ describe('useAuditionRecorder 瞬间标记', () => {
     if (!rejected.ok) expect(rejected.reason).toBe('not-recording')
 
     // starting
-    act(() => result.current.start())
+    act(() => result.current.beginPreflight())
     rejected = result.current.addMarker('授权中')
     expect(rejected.ok).toBe(false)
     if (!rejected.ok) expect(rejected.reason).toBe('starting')
 
+    // preview
     await act(async () => {
       g.grant()
       await Promise.resolve()
     })
+    rejected = result.current.addMarker('预检中')
+    expect(rejected.ok).toBe(false)
+    if (!rejected.ok) expect(rejected.reason).toBe('preflight')
+    act(() => result.current.confirmStart())
     const rec = FakeMediaRecorder.instances[
       FakeMediaRecorder.instances.length - 1
     ]

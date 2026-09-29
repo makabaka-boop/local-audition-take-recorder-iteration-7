@@ -196,7 +196,7 @@ describe('设备枚举与热插拔（UI）', () => {
     })
 
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: '开始 take' }))
+      fireEvent.click(screen.getByRole('button', { name: '检查设备' }))
     })
     expect(g.pending).toHaveLength(1)
     expect(cameraSelect().disabled).toBe(true)
@@ -264,11 +264,14 @@ describe('设备枚举与热插拔（UI）', () => {
 
     // 用自动落到的 cam1 拍一条
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: '开始 take' }))
+      fireEvent.click(screen.getByRole('button', { name: '检查设备' }))
     })
     await act(async () => {
       g.grant()
       await Promise.resolve()
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '确认开拍' }))
     })
     const rec = FakeMediaRecorder.instances[0]
     // 录制中再拔掉 mic1：本次锁定显示 mic1，不漂移
@@ -317,10 +320,13 @@ describe('设备枚举与热插拔（UI）', () => {
         fireEvent.click(screen.getByRole('radio', { name: new RegExp(modeName) }))
       })
       await act(async () => {
-        fireEvent.click(screen.getByRole('button', { name: '开始 take' }))
+        fireEvent.click(screen.getByRole('button', { name: '检查设备' }))
         g.grant()
         await Promise.resolve()
         await Promise.resolve()
+      })
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: '确认开拍' }))
       })
       const rec = FakeMediaRecorder.instances[
         FakeMediaRecorder.instances.length - 1
@@ -417,10 +423,10 @@ describe('设备枚举与热插拔（UI）', () => {
     })
 
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: '开始 take' }))
+      fireEvent.click(screen.getByRole('button', { name: '检查设备' }))
     })
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: '取消本次开拍' }))
+      fireEvent.click(screen.getByRole('button', { name: '取消预检' }))
     })
     expect(cameraSelect().disabled).toBe(false)
     expect(document.querySelectorAll('.take-card')).toHaveLength(0)

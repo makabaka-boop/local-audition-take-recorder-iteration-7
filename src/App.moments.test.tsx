@@ -90,12 +90,16 @@ function addMarkerByUi(label: string) {
 
 async function clickStart(g?: ReturnType<typeof installGlobals>) {
   await act(async () => {
-    fireEvent.click(screen.getByRole('button', { name: '开始 take' }))
+    fireEvent.click(screen.getByRole('button', { name: '检查设备' }))
     if (g) {
       g.grant()
-      await Promise.resolve()
     }
     await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+  })
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: '确认开拍' }))
     await Promise.resolve()
   })
   return FakeMediaRecorder.instances[
@@ -227,14 +231,26 @@ describe('瞬间标记页面', () => {
     ).toBeTruthy()
 
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: '开始 take' }))
+      fireEvent.click(screen.getByRole('button', { name: '检查设备' }))
     })
     expect(markerInput().disabled).toBe(true)
     expect(
-      screen.getByText('正在等待设备授权，授权后开始录制才可打标记。'),
+      screen.getByText('正在请求设备或启动录制器，正式开始录制后才可打标记。'),
     ).toBeTruthy()
 
-    const rec = await clickStart(g)
+    await act(async () => {
+      g.grant()
+      await Promise.resolve()
+    })
+    expect(
+      screen.getByText('仍在开拍预检；确认画面和麦克风正常后，点“确认开拍”再打标记。'),
+    ).toBeTruthy()
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '确认开拍' }))
+    })
+    const rec = FakeMediaRecorder.instances[
+      FakeMediaRecorder.instances.length - 1
+    ]
 
     act(() => rec.emitData(['d']))
     fireEvent.click(screen.getByRole('button', { name: '停止' }))

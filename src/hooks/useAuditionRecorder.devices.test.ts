@@ -36,6 +36,7 @@ interface ControllableApi {
   enumerateCalls: () => number
   getUserMedia: ReturnType<typeof vi.fn>
   pendingPermissions: Pending[]
+  sessions: Array<{ stream: MediaStream; tracks: FakeTrack[] }>
   grant: () => void
   deny: (err?: Error) => void
 }
@@ -48,6 +49,7 @@ function installControllable(opts?: {
   const pendingEnums: Array<(devices: DeviceDef[]) => void> = []
   const deviceChangeListeners: Array<() => void> = []
   const pendingPermissions: Pending[] = []
+  const sessions: Array<{ stream: MediaStream; tracks: FakeTrack[] }> = []
   const missing = new Set(opts?.missingKinds ?? [])
 
   const tracksFor = (constraints?: MediaStreamConstraints): FakeTrack[] => {
@@ -119,6 +121,7 @@ function installControllable(opts?: {
     enumerateCalls: () => enumCalls,
     getUserMedia,
     pendingPermissions,
+    sessions,
     resolveEnumeration: (devices) => {
       const resolve = pendingEnums.shift()
       if (!resolve) throw new Error('没有等待中的枚举请求')
@@ -134,7 +137,9 @@ function installControllable(opts?: {
       const item = pendingPermissions.shift()
       if (!item) throw new Error('没有等待中的授权请求')
       const set = tracksFor(item.constraints)
-      item.resolve({ getTracks: () => set } as unknown as MediaStream)
+      const stream = { getTracks: () => set } as unknown as MediaStream
+      sessions.push({ stream, tracks: set })
+      item.resolve(stream)
     },
     deny: (err) =>
       pendingPermissions
@@ -163,12 +168,14 @@ async function flush() {
 
 /** 录制一条成片并停止落定（手动授权模式由 grant 参数放行） */
 async function shootTake(result: RecResult, api: ControllableApi, content: string) {
-  act(() => result.current.start())
+  act(() => result.current.beginPreflight())
   await flush()
   if (api.pendingPermissions.length > 0) {
     act(() => api.grant())
     await flush()
   }
+  act(() => result.current.confirmStart())
+  await flush()
   const rec = FakeMediaRecorder.instances[
     FakeMediaRecorder.instances.length - 1
   ]
@@ -324,7 +331,7 @@ describe('空闲选择的保持与设备消失提示', () => {
     expect(result.current.videoNotice).toContain('下一条 take')
 
     // 下一条 take 的取流约束落到 cam1（不是已拔除的 cam2）
-    act(() => result.current.start())
+    act(() => result.current.beginPreflight())
     await flush()
     expect(api.pendingPermissions[0].constraints).toEqual({
       video: { deviceId: { exact: 'cam1' } },
@@ -332,6 +339,7 @@ describe('空闲选择的保持与设备消失提示', () => {
     })
     act(() => api.grant())
     await flush()
+    act(() => result.current.confirmStart())
     expect(result.current.status).toBe('recording')
     const rec = FakeMediaRecorder.instances[0]
     await act(async () => {
@@ -365,7 +373,7 @@ describe('空闲选择的保持与设备消失提示', () => {
 
     // 切到仅视频：不请求麦克风，授权放行后正常录制
     act(() => result.current.setMode('video-only'))
-    act(() => result.current.start())
+    act(() => result.current.beginPreflight())
     await flush()
     expect(api.pendingPermissions[0].constraints).toEqual({
       video: { deviceId: { exact: 'cam1' } },
@@ -373,6 +381,7 @@ describe('空闲选择的保持与设备消失提示', () => {
     })
     act(() => api.grant())
     await flush()
+    act(() => result.current.confirmStart())
     expect(result.current.status).toBe('recording')
     const rec = FakeMediaRecorder.instances[0]
     await act(async () => {
@@ -427,7 +436,7 @@ describe('授权等待 / 录制 / 暂停期间的设备变更', () => {
       await Promise.resolve()
     })
 
-    act(() => result.current.start())
+    act(() => result.current.beginPreflight())
     await flush()
     expect(result.current.status).toBe('starting')
     expect(result.current.activeVideoDevice?.id).toBe('cam1')
@@ -461,9 +470,47 @@ describe('授权等待 / 录制 / 暂停期间的设备变更', () => {
 
     act(() => api.grant())
     await flush()
+    expect(result.current.status).toBe('preview')
+    act(() => result.current.confirmStart())
     expect(result.current.status).toBe('recording')
     expect(result.current.activeVideoDevice?.id).toBe('cam1')
     expect(result.current.activeAudioDevice?.id).toBe('mic1')
+  })
+
+  it('preview 设备变更只更新下一条选择；确认开拍仍交接旧预检流且不再次取设备', async () => {
+    const api = installControllable({ manualPermissions: true })
+    const { result } = renderHook(() => useAuditionRecorder())
+    await flush()
+    await act(async () => {
+      api.resolveEnumeration([CAMS.cam1, MICS.mic1])
+      await Promise.resolve()
+    })
+
+    act(() => result.current.beginPreflight())
+    await flush()
+    act(() => api.grant())
+    await flush()
+    expect(result.current.status).toBe('preview')
+    const previewStream = result.current.liveStream
+
+    act(() => api.emitDeviceChange())
+    await act(async () => {
+      api.resolveEnumeration([CAMS.cam2, MICS.mic2])
+      await Promise.resolve()
+    })
+
+    // 本次仍冻结 cam1/mic1；下一条待选才切到新设备。
+    expect(result.current.activeVideoDevice?.id).toBe('cam1')
+    expect(result.current.activeAudioDevice?.id).toBe('mic1')
+    expect(result.current.videoDeviceId).toBe('cam2')
+    expect(result.current.audioDeviceId).toBe('mic2')
+    expect(result.current.liveStream).toBe(previewStream)
+
+    act(() => result.current.confirmStart())
+    expect(result.current.status).toBe('recording')
+    expect(api.getUserMedia).toHaveBeenCalledTimes(1)
+    expect(FakeMediaRecorder.streams[0]).toBe(previewStream)
+    expect(result.current.liveStream).toBe(previewStream)
   })
 
   it('录制中拔掉本次麦克风：展示与成片身份保持冻结；停止后下一条设备已明确切换并提示', async () => {
@@ -476,10 +523,11 @@ describe('授权等待 / 录制 / 暂停期间的设备变更', () => {
     })
     act(() => result.current.setAudioDeviceId('mic1'))
 
-    act(() => result.current.start())
+    act(() => result.current.beginPreflight())
     await flush()
     act(() => api.grant())
     await flush()
+    act(() => result.current.confirmStart())
     expect(result.current.status).toBe('recording')
     const rec = FakeMediaRecorder.instances[0]
 
@@ -522,7 +570,7 @@ describe('授权等待 / 录制 / 暂停期间的设备变更', () => {
 
     // 停止后开下一条：沿用已对账的 mic2（不会再请求已拔除的 mic1）
     expect(result.current.audioDeviceId).toBe('mic2')
-    act(() => result.current.start())
+    act(() => result.current.beginPreflight())
     await flush()
     expect(api.pendingPermissions[0].constraints).toEqual({
       video: { deviceId: { exact: 'cam1' } },
@@ -539,10 +587,11 @@ describe('授权等待 / 录制 / 暂停期间的设备变更', () => {
       await Promise.resolve()
     })
 
-    act(() => result.current.start())
+    act(() => result.current.beginPreflight())
     await flush()
     act(() => api.grant())
     await flush()
+    act(() => result.current.confirmStart())
     const rec = FakeMediaRecorder.instances[0]
 
     act(() => api.emitDeviceChange())
@@ -566,7 +615,7 @@ describe('授权等待 / 录制 / 暂停期间的设备变更', () => {
 
     // 停止后明确改选 cam2，下一条精确取 cam2
     act(() => result.current.setVideoDeviceId('cam2'))
-    act(() => result.current.start())
+    act(() => result.current.beginPreflight())
     await flush()
     expect(api.pendingPermissions[0].constraints).toEqual({
       video: { deviceId: { exact: 'cam2' } },
@@ -590,7 +639,7 @@ describe('失败提示与旧素材兼容', () => {
 
     // 导演选 cam2，随后 cam2 被拔除但枚举尚未刷新（极端：直接开拍即失败）。
     act(() => result.current.setVideoDeviceId('cam2'))
-    act(() => result.current.start())
+    act(() => result.current.beginPreflight())
     await flush()
     expect(api.pendingPermissions[0].constraints).toEqual({
       video: { deviceId: { exact: 'cam2' } },
@@ -687,7 +736,7 @@ describe('失败提示与旧素材兼容', () => {
     expect(result.current.videoNotice).toBe('')
     expect(result.current.audioNotice).toBe('')
 
-    act(() => result.current.start())
+    act(() => result.current.beginPreflight())
     await flush()
     expect(api.pendingPermissions[0].constraints).toEqual({
       video: true,

@@ -27,8 +27,10 @@ afterEach(() => {
 })
 
 async function startTake(h: Harness) {
-  h.recorder.start()
+  h.recorder.beginPreflight()
   await h.flush()
+  expect(h.recorder.getStatus()).toBe('preview')
+  h.recorder.confirmStart()
   expect(h.recorder.getStatus()).toBe('recording')
   return h.lastRecorder()
 }
@@ -147,8 +149,8 @@ describe('重复操作幂等', () => {
   it('录制中重复 start 被忽略，不产生第二个 recorder/流', async () => {
     const h = makeHarness()
     await startTake(h)
-    h.recorder.start()
-    h.recorder.start()
+    h.recorder.beginPreflight()
+    h.recorder.beginPreflight()
     await h.flush()
     expect(FakeMediaRecorder.instances).toHaveLength(1)
     expect(h.sessions).toHaveLength(1)
@@ -187,7 +189,7 @@ describe('start 失败路径', () => {
   it('无任何受支持编码时禁止开拍并报 codec-unsupported', async () => {
     FakeMediaRecorder.supported = []
     const h = makeHarness()
-    h.recorder.start()
+    h.recorder.beginPreflight()
     await h.flush()
     expect(h.errors[0]?.code).toBe('codec-unsupported')
     expect(h.recorder.getStatus()).toBe('idle')
@@ -198,7 +200,7 @@ describe('start 失败路径', () => {
     const h = makeHarness({
       reject: new DOMException('denied', 'NotAllowedError'),
     })
-    h.recorder.start()
+    h.recorder.beginPreflight()
     await h.flush()
     expect(h.errors[0]?.code).toBe('permission-denied')
     expect(h.recorder.getStatus()).toBe('idle')
@@ -208,8 +210,10 @@ describe('start 失败路径', () => {
   it('取流成功但 recorder 构造抛错：释放轨道、回 idle、报 start-failed', async () => {
     const h = makeHarness()
     FakeMediaRecorder.ctorThrows = new Error('construct boom')
-    h.recorder.start()
+    h.recorder.beginPreflight()
     await h.flush()
+    expect(h.recorder.getStatus()).toBe('preview')
+    h.recorder.confirmStart()
     expect(h.errors[0]?.code).toBe('start-failed')
     expect(h.recorder.getStatus()).toBe('idle')
     const tracks = h.sessions[0].tracks
@@ -222,8 +226,10 @@ describe('start 失败路径', () => {
       'could not start',
       'InvalidStateError',
     )
-    h.recorder.start()
+    h.recorder.beginPreflight()
     await h.flush()
+    expect(h.recorder.getStatus()).toBe('preview')
+    h.recorder.confirmStart()
     expect(h.errors[0]?.code).toBe('start-failed')
     expect(h.recorder.getStatus()).toBe('idle')
     expect(h.sessions[0].tracks.every((t) => t.readyState === 'ended')).toBe(
@@ -421,7 +427,7 @@ describe('dispose', () => {
   it('dispose 后 start/pause/stop 均无效果', async () => {
     const h = makeHarness()
     h.recorder.dispose()
-    h.recorder.start()
+    h.recorder.beginPreflight()
     await h.flush()
     expect(h.sessions).toHaveLength(0)
     expect(h.errors).toHaveLength(0)
@@ -462,8 +468,9 @@ describe('依赖注入内核（自定义 deps）', () => {
       },
       deps,
     )
-    recorder.start()
+    recorder.beginPreflight()
     await new Promise((r) => setTimeout(r, 0))
+    recorder.confirmStart()
     created[0].emitData(['z'])
     recorder.stop()
     created[0].emitStop()
@@ -488,8 +495,10 @@ async function startMode(
   mode: CaptureMode,
   devices: { videoDeviceId?: string; audioDeviceId?: string } = {},
 ) {
-  h.recorder.start({ mode, ...devices })
+  h.recorder.beginPreflight({ mode, ...devices })
   await h.flush()
+  expect(h.recorder.getStatus()).toBe('preview')
+  h.recorder.confirmStart()
   expect(h.recorder.getStatus()).toBe('recording')
   return h.lastRecorder()
 }
@@ -571,15 +580,16 @@ describe('三种模式独立探测 MIME', () => {
   it('选中无能力的模式开拍：只报 codec-unsupported，不取设备、不动旧 take', async () => {
     FakeMediaRecorder.supported = ['audio/webm']
     const h = makeHarness()
-    h.recorder.start({ mode: 'av' })
+    h.recorder.beginPreflight({ mode: 'av' })
     await h.flush()
     expect(h.errors[0]?.code).toBe('codec-unsupported')
     expect(h.recorder.getStatus()).toBe('idle')
     expect(h.sessions).toHaveLength(0)
     expect(h.takes).toHaveLength(0)
     // 其它模式能力仍保留：切到仅音频即可开拍
-    h.recorder.start({ mode: 'audio-only' })
+    h.recorder.beginPreflight({ mode: 'audio-only' })
     await h.flush()
+    h.recorder.confirmStart()
     expect(h.recorder.getStatus()).toBe('recording')
   })
 })
@@ -623,8 +633,9 @@ describe('采集计划只请求所需轨道', () => {
 
   it('音视频：video/audio 均请求，无参 start 兼容为 av', async () => {
     const h = makeHarness()
-    h.recorder.start()
+    h.recorder.beginPreflight()
     await h.flush()
+    h.recorder.confirmStart()
     expect(h.recorder.getStatus()).toBe('recording')
     expect(h.calls[0]).toEqual(expectedConstraints('av'))
     expect(h.sessions[0].tracks.map((t) => t.kind)).toEqual([
@@ -657,7 +668,7 @@ describe('采集计划只请求所需轨道', () => {
 describe('设备身份随开拍冻结并随成片固化', () => {
   it('av：deviceId 与展示名在 starting 即可读，成片携带同一身份', async () => {
     const h = makeHarness({ manualPermissions: true })
-    h.recorder.start({
+    h.recorder.beginPreflight({
       mode: 'av',
       videoDeviceId: 'cam-A',
       audioDeviceId: 'mic-A',
@@ -679,6 +690,9 @@ describe('设备身份随开拍冻结并随成片固化', () => {
 
     h.media.grant()
     await h.flush()
+    expect(h.recorder.getStatus()).toBe('preview')
+    h.recorder.confirmStart()
+    expect(h.recorder.getStatus()).toBe('recording')
     const rec = h.lastRecorder()
     // 录制中身份不变
     expect(h.recorder.getActiveVideoDevice()?.id).toBe('cam-A')
@@ -694,7 +708,7 @@ describe('设备身份随开拍冻结并随成片固化', () => {
   it('仅视频/仅音频：与模式无关的设备身份为 null，但传入 id 也不进入约束', async () => {
     const hVideo = makeHarness()
     const recV = hVideo.recorder
-    recV.start({
+    recV.beginPreflight({
       mode: 'video-only',
       videoDeviceId: 'cam-only',
       videoDeviceLabel: '特写机位',
@@ -706,6 +720,8 @@ describe('设备身份随开拍冻结并随成片固化', () => {
       id: 'cam-only',
       label: '特写机位',
     })
+    recV.confirmStart()
+    expect(hVideo.recorder.getStatus()).toBe('recording')
     expect(recV.getActiveAudioDevice()).toBeNull()
     const rv = hVideo.lastRecorder()
     rv.emitData(['v'])
@@ -718,7 +734,7 @@ describe('设备身份随开拍冻结并随成片固化', () => {
 
     const hAudio = makeHarness()
     const recA = hAudio.recorder
-    recA.start({
+    recA.beginPreflight({
       mode: 'audio-only',
       audioDeviceId: 'mic-only',
       audioDeviceLabel: '吊杆麦',
@@ -730,6 +746,8 @@ describe('设备身份随开拍冻结并随成片固化', () => {
       label: '吊杆麦',
     })
     expect(recA.getActiveVideoDevice()).toBeNull()
+    recA.confirmStart()
+    expect(hAudio.recorder.getStatus()).toBe('recording')
     const ra = hAudio.lastRecorder()
     ra.emitData(['a'])
     stopAndEmit(hAudio, ra)
@@ -742,10 +760,11 @@ describe('设备身份随开拍冻结并随成片固化', () => {
 
   it('未给设备 id/label：冻结为系统默认（id 空串），约束退化为 true', async () => {
     const h = makeHarness()
-    h.recorder.start({ mode: 'av' })
+    h.recorder.beginPreflight({ mode: 'av' })
     await h.flush()
     expect(h.recorder.getActiveVideoDevice()).toEqual({ id: '', label: '' })
     expect(h.calls[0]).toEqual({ video: true, audio: true })
+    h.recorder.confirmStart()
     const rec = h.lastRecorder()
     rec.emitData(['default-dev'])
     stopAndEmit(h, rec)
@@ -757,7 +776,7 @@ describe('设备身份随开拍冻结并随成片固化', () => {
 describe('开拍冻结（等待授权期间）', () => {
   it('点击开拍在权限申请前进入 starting 并冻结模式/MIME，授权后按冻结参数成片', async () => {
     const h = makeHarness({ manualPermissions: true })
-    h.recorder.start({
+    h.recorder.beginPreflight({
       mode: 'audio-only',
       videoDeviceId: 'cam',
       audioDeviceId: 'mic',
@@ -771,8 +790,8 @@ describe('开拍冻结（等待授权期间）', () => {
     )
 
     // 等待授权期间重复 start：被状态守卫挡下，不产生第二次取流
-    h.recorder.start({ mode: 'video-only' })
-    h.recorder.start({})
+    h.recorder.beginPreflight({ mode: 'video-only' })
+    h.recorder.beginPreflight({})
     expect(h.media.pending).toHaveLength(1)
 
     // 授权期间环境“能力”即便变化也无影响：冻结 MIME 不再重探
@@ -780,6 +799,8 @@ describe('开拍冻结（等待授权期间）', () => {
 
     h.media.grant()
     await h.flush()
+    expect(h.recorder.getStatus()).toBe('preview')
+    h.recorder.confirmStart()
     expect(h.recorder.getStatus()).toBe('recording')
     expect(h.recorder.getActiveMode()).toBe('audio-only')
     const rec = h.lastRecorder()
@@ -797,7 +818,7 @@ describe('开拍冻结（等待授权期间）', () => {
 
   it('等待授权时切换模式/重复开始不能让取流约束漂移', async () => {
     const h = makeHarness({ manualPermissions: true })
-    h.recorder.start({
+    h.recorder.beginPreflight({
       mode: 'video-only',
       videoDeviceId: 'cam-A',
       audioDeviceId: 'mic-A',
@@ -808,7 +829,7 @@ describe('开拍冻结（等待授权期间）', () => {
     )
 
     // 内核层面：重复 start 携带任何模式/设备都无效
-    h.recorder.start({
+    h.recorder.beginPreflight({
       mode: 'audio-only',
       videoDeviceId: 'cam-B',
       audioDeviceId: 'mic-B',
@@ -822,6 +843,9 @@ describe('开拍冻结（等待授权期间）', () => {
 
     h.media.grant()
     await h.flush()
+    expect(h.recorder.getStatus()).toBe('preview')
+    h.recorder.confirmStart()
+    expect(h.recorder.getStatus()).toBe('recording')
     const rec = h.lastRecorder()
     expect(rec.mimeType).toBe('video/webm;codecs=vp9')
     rec.emitData(['locked'])
@@ -834,16 +858,17 @@ describe('开拍冻结（等待授权期间）', () => {
     const h = makeHarness({ manualPermissions: true })
 
     // 先正常录一条旧的 av 成片
-    h.recorder.start({ mode: 'av' })
+    h.recorder.beginPreflight({ mode: 'av' })
     h.media.grant()
     await h.flush()
+    h.recorder.confirmStart()
     const r0 = h.lastRecorder()
     r0.emitData(['old'])
     stopAndEmit(h, r0)
     expect(h.takes).toHaveLength(1)
 
     // 第二次开拍改走仅视频，授权被拒
-    h.recorder.start({ mode: 'video-only' })
+    h.recorder.beginPreflight({ mode: 'video-only' })
     expect(h.recorder.getStatus()).toBe('starting')
     h.media.deny()
     await h.flush()
@@ -857,23 +882,25 @@ describe('开拍冻结（等待授权期间）', () => {
     expect(h.recorder.getSupportedMimeType('video-only')).toBe(
       'video/webm;codecs=vp9',
     )
-    h.recorder.start({ mode: 'video-only' })
+    h.recorder.beginPreflight({ mode: 'video-only' })
     h.media.grant()
     await h.flush()
+    h.recorder.confirmStart()
     expect(h.recorder.getStatus()).toBe('recording')
   })
 
   it('授权后迟到的流在回 idle/新会话时被释放（会话守卫不漂移）', async () => {
     const h = makeHarness({ manualPermissions: true })
-    h.recorder.start({ mode: 'audio-only' })
+    h.recorder.beginPreflight({ mode: 'audio-only' })
     h.media.deny()
     await h.flush()
     expect(h.recorder.getStatus()).toBe('idle')
     // 第二次开拍：前一次的 pending 已消费，新的授权正常
-    h.recorder.start({ mode: 'audio-only' })
+    h.recorder.beginPreflight({ mode: 'audio-only' })
     expect(h.recorder.getStatus()).toBe('starting')
     h.media.grant()
     await h.flush()
+    h.recorder.confirmStart()
     expect(h.recorder.getStatus()).toBe('recording')
   })
 })
@@ -882,8 +909,10 @@ describe('失败后模式能力与资源保留', () => {
   it('仅视频 recorder 构造失败：释放新流、回 idle，音频模式能力不受影响', async () => {
     const h = makeHarness()
     FakeMediaRecorder.ctorThrows = new Error('ctor boom')
-    h.recorder.start({ mode: 'video-only' })
+    h.recorder.beginPreflight({ mode: 'video-only' })
     await h.flush()
+    expect(h.recorder.getStatus()).toBe('preview')
+    h.recorder.confirmStart()
     expect(h.errors[0]?.code).toBe('start-failed')
     expect(h.recorder.getStatus()).toBe('idle')
     expect(h.sessions[0].tracks.every((t) => t.readyState === 'ended')).toBe(
@@ -931,7 +960,7 @@ describe('确定结局：授权中取消 / 暂停中停止 / 延迟结束 / 停�
   describe('授权弹窗未决时取消', () => {
     it('starting 中 stop() 即取消：回 idle、无成片无错误、轨道不残留、可立即改模式重拍', async () => {
       const h = makeHarness({ manualPermissions: true })
-      h.recorder.start({
+      h.recorder.beginPreflight({
         mode: 'audio-only',
         audioDeviceId: 'mic-1',
       })
@@ -959,10 +988,11 @@ describe('确定结局：授权中取消 / 暂停中停止 / 延迟结束 / 停�
       ).toBe(true)
 
       // 解锁：可切换模式并再次开拍
-      h.recorder.start({ mode: 'video-only' })
+      h.recorder.beginPreflight({ mode: 'video-only' })
       expect(h.media.pending).toHaveLength(1)
       h.media.grant()
       await h.flush()
+      h.recorder.confirmStart()
       expect(h.recorder.getStatus()).toBe('recording')
       const rec = h.lastRecorder()
       expect(rec.mimeType).toBe('video/webm;codecs=vp9')
@@ -974,7 +1004,7 @@ describe('确定结局：授权中取消 / 暂停中停止 / 延迟结束 / 停�
 
     it('取消后迟到的拒绝结果同样被吞掉：不报错、可重拍', async () => {
       const h = makeHarness({ manualPermissions: true })
-      h.recorder.start({ mode: 'av' })
+      h.recorder.beginPreflight({ mode: 'av' })
       h.recorder.stop()
       expect(h.recorder.getStatus()).toBe('idle')
 
@@ -983,24 +1013,26 @@ describe('确定结局：授权中取消 / 暂停中停止 / 延迟结束 / 停�
       expect(h.errors).toHaveLength(0)
       expect(h.recorder.getStatus()).toBe('idle')
 
-      h.recorder.start({ mode: 'av' })
+      h.recorder.beginPreflight({ mode: 'av' })
       h.media.grant()
       await h.flush()
+      h.recorder.confirmStart()
       expect(h.recorder.getStatus()).toBe('recording')
     })
 
     it('等待授权期间取消不影响旧 take 与既有交付素材', async () => {
       const h = makeHarness({ manualPermissions: true })
-      h.recorder.start({ mode: 'av' })
+      h.recorder.beginPreflight({ mode: 'av' })
       h.media.grant()
       await h.flush()
+      h.recorder.confirmStart()
       const old = h.lastRecorder()
       old.emitData(['old-take'])
       stopAndEmit(h, old)
       expect(h.takes).toHaveLength(1)
       const oldTake = h.takes[0]
 
-      h.recorder.start({ mode: 'audio-only' })
+      h.recorder.beginPreflight({ mode: 'audio-only' })
       h.recorder.stop()
       expect(h.takes).toHaveLength(1)
       expect(h.takes[0]).toBe(oldTake)
@@ -1179,18 +1211,20 @@ describe('确定结局：授权中取消 / 暂停中停止 / 延迟结束 / 停�
     it('stop() 返回但无结束事件且无数据：报 stop-failed，旧成片与选择不受影响', async () => {
       const h = makeHarness({ manualPermissions: true })
       // 先录一条旧成片
-      h.recorder.start({ mode: 'av' })
+      h.recorder.beginPreflight({ mode: 'av' })
       h.media.grant()
       await h.flush()
+      h.recorder.confirmStart()
       const old = h.lastRecorder()
       old.emitData(['old'])
       stopAndEmit(h, old)
       const oldTake = h.takes[0]
 
       // 第二条：编码器拒绝落定且无数据
-      h.recorder.start({ mode: 'av' })
+      h.recorder.beginPreflight({ mode: 'av' })
       h.media.grant()
       await h.flush()
+      h.recorder.confirmStart()
       const stuck = h.lastRecorder()
       h.recorder.stop()
       h.clock.advance(STOP_FINALIZE_GRACE_MS)
@@ -1281,7 +1315,7 @@ describe('确定结局：授权中取消 / 暂停中停止 / 延迟结束 / 停�
 
     it('starting 中 dispose：迟到授权结果的流被释放，状态确定为 idle', async () => {
       const h = makeHarness({ manualPermissions: true })
-      h.recorder.start({ mode: 'av' })
+      h.recorder.beginPreflight({ mode: 'av' })
       h.recorder.dispose()
       expect(h.recorder.getStatus()).toBe('idle')
 

@@ -23,6 +23,7 @@ import type {
 
 export class FakeTrack implements MediaStreamTrackLike {
   readyState: 'live' | 'ended' = 'live'
+  stopCalls = 0
   private listeners = new Set<() => void>()
 
   constructor(
@@ -33,6 +34,7 @@ export class FakeTrack implements MediaStreamTrackLike {
   stop(): void {
     if (this.readyState === 'ended') return
     this.readyState = 'ended'
+    this.stopCalls++
     this.onStopCall?.()
   }
 
@@ -79,6 +81,7 @@ export class FakeMediaRecorder implements MediaRecorderLike {
   /** stop() 无论何种状态都抛错（模拟录制器拒绝停止） */
   static stopThrows: Error | null = null
   static instances: FakeMediaRecorder[] = []
+  static streams: MediaStreamLike[] = []
 
   static isTypeSupported(mimeType: string): boolean {
     return FakeMediaRecorder.supported.includes(mimeType)
@@ -92,6 +95,7 @@ export class FakeMediaRecorder implements MediaRecorderLike {
     FakeMediaRecorder.stopThrowsOnInactive = false
     FakeMediaRecorder.stopThrows = null
     FakeMediaRecorder.instances = []
+    FakeMediaRecorder.streams = []
   }
 
   readonly mimeType: string
@@ -112,6 +116,7 @@ export class FakeMediaRecorder implements MediaRecorderLike {
   ) {
     if (FakeMediaRecorder.ctorThrows) throw FakeMediaRecorder.ctorThrows
     this.mimeType = options?.mimeType ?? 'video/webm;codecs=vp9,opus'
+    FakeMediaRecorder.streams.push(_stream)
     FakeMediaRecorder.instances.push(this)
   }
 

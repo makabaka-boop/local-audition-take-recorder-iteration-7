@@ -28,8 +28,10 @@ afterEach(() => {
 })
 
 async function startTake(h: Harness) {
-  h.recorder.start()
+  h.recorder.beginPreflight()
   await h.flush()
+  expect(h.recorder.getStatus()).toBe('preview')
+  h.recorder.confirmStart()
   expect(h.recorder.getStatus()).toBe('recording')
   return h.lastRecorder()
 }
@@ -135,14 +137,17 @@ describe('瞬间标记：不可写入状态给出明确提示', () => {
     expect(h.takes[0].markers).toEqual([])
   })
 
-  it('starting（等待权限）：starting 拒绝；授权通过后可写', async () => {
+  it('starting/preview（预检中）：分别拒绝；确认开拍后可写', async () => {
     const h = makeHarness({ manualPermissions: true })
-    h.recorder.start({ mode: 'av' })
+    h.recorder.beginPreflight({ mode: 'av' })
     expect(h.recorder.getStatus()).toBe('starting')
     expectRejected(h.recorder.addMarker('授权还没回来'), 'starting')
 
     h.media.grant()
     await h.flush()
+    expect(h.recorder.getStatus()).toBe('preview')
+    expectRejected(h.recorder.addMarker('还在预检'), 'preflight')
+    h.recorder.confirmStart()
     const rec = h.lastRecorder()
     markOk(h, '开拍了')
     rec.emitData(['d'])
@@ -488,7 +493,7 @@ describe('瞬间标记：会话隔离（切换 take 不串标记）', () => {
 
   it('授权等待取消后重录：被取消会话不允许写入，重录实时镜像从空开始', async () => {
     const h = makeHarness({ manualPermissions: true })
-    h.recorder.start({ mode: 'av' })
+    h.recorder.beginPreflight({ mode: 'av' })
     expectRejected(h.recorder.addMarker('等授权'), 'starting')
     h.recorder.stop() // 取消本次开拍
     expect(h.recorder.getStatus()).toBe('idle')
@@ -496,9 +501,10 @@ describe('瞬间标记：会话隔离（切换 take 不串标记）', () => {
     await h.flush()
     expect(FakeMediaRecorder.instances).toHaveLength(0)
 
-    h.recorder.start({ mode: 'av' })
+    h.recorder.beginPreflight({ mode: 'av' })
     h.media.grant()
     await h.flush()
+    h.recorder.confirmStart()
     const rec = h.lastRecorder()
     expect(h.recorder.getLiveMarkers()).toEqual([])
     markOk(h, '重录')

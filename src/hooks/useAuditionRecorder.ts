@@ -66,7 +66,7 @@ export function useAuditionRecorder() {
   const [mimeByMode, setMimeByMode] = useState<
     Record<CaptureMode, string | null>
   >({ av: null, 'video-only': null, 'audio-only': null })
-  // 进行中的实际模式/MIME（starting 起冻结，回 idle 清空）
+  // 进行中的实际模式/MIME（预检 starting 起冻结，回 idle 清空）
   const [activeMode, setActiveMode] = useState<CaptureMode | null>(null)
   const [activeMimeType, setActiveMimeType] = useState<string | null>(null)
   /**
@@ -273,18 +273,17 @@ export function useAuditionRecorder() {
     }
   }, [refreshDevices])
 
-  const start = useCallback(() => {
+  /**
+   * 进入开拍预检：按当前模式与设备申请一次流，实时预览与输入反馈均使用
+   * 该流。预检期间模式/设备锁定；要改设置必须先取消，再按新设置申请。
+   */
+  const beginPreflight = useCallback(() => {
     const recorder = recorderRef.current
     if (!recorder || recorder.getStatus() !== 'idle') return
     setError(null)
-    // 绝不在开拍前清空既有成片：授权被拒 / 录制器初始化或启动失败时，
-    // 已有的 take 及其交付版选择必须原样保留（新成片由 onTake 追加）。
-    //
-    // 取流统一由内核负责：进入 start 的同一拍即切到 starting 并冻结
-    // 模式、MIME 与相关设备（含展示名），随后才申请权限；等待授权期间
-    // 重复 start 被内核的状态守卫挡下，模式/设备切换与迟到枚举也改不动
-    // 已冻结的计划。
-    recorder.start({
+    // 绝不在预检前清空既有成片：权限被拒、设备拔出、录制器启动失败时，
+    // 已有的 take 及其交付版选择必须原样保留。
+    recorder.beginPreflight({
       mode,
       videoDeviceId: videoIdRef.current,
       audioDeviceId: audioIdRef.current,
@@ -292,6 +291,17 @@ export function useAuditionRecorder() {
       audioDeviceLabel: audioLabelRef.current,
     })
   }, [mode])
+
+  /**
+   * 确认预检后正式开拍。内核只接收“当前预检会话”，不接收新约束或新流，
+   * 因而不会重新请求设备；同一个 MediaStream 转交给录制器。
+   */
+  const confirmStart = useCallback(() => {
+    const recorder = recorderRef.current
+    if (!recorder || recorder.getStatus() !== 'preview') return
+    setError(null)
+    recorder.confirmStart()
+  }, [])
 
   const pause = useCallback(() => recorderRef.current?.pause(), [])
   const resume = useCallback(() => recorderRef.current?.resume(), [])
@@ -331,10 +341,19 @@ export function useAuditionRecorder() {
   }, [])
 
   const isIdle = status === 'idle'
+  const isPreview = status === 'preview'
   const canSwitchDevice = isIdle
-  // 当前所选模式有可用 MIME 才允许开拍；冻结期间（starting…）按钮同样禁用
+  // 当前所选模式有可用 MIME 且空闲时才能申请预检；预检/录制期间按钮禁用
   const canStart = isIdle && mimeByMode[mode] !== null
-  // 瞬间标记只在录制中可写入：暂停/等待权限/停止中/已结束一律禁用入口
+  // 只有有效预览流仍由预检会话持有时，才允许确认开拍，避免界面显示可拍
+  // 但媒体资源已失效。
+  const canConfirmStart = isPreview && liveStream !== null
+  // 授权未决或预检确认前都提供明确取消；录制启动的 starting 窗口极短且
+  // 无安全取消语义，停止按钮禁用。
+  const canCancel =
+    (status === 'starting' && liveStream === null) || status === 'preview'
+  const canStop = canCancel || status === 'recording' || status === 'paused'
+  // 瞬间标记只在录制中可写入：预检/暂停/等待权限/停止中/已结束一律拒绝
   const canMark = status === 'recording'
   const selectedTake = takes.find((t) => t.id === selectedTakeId) ?? null
 
@@ -394,11 +413,15 @@ export function useAuditionRecorder() {
     deleteTake,
     error,
     canStart,
+    canConfirmStart,
+    canCancel,
+    canStop,
     canSwitchDevice,
     canMark,
     liveMarkers,
     liveStream,
-    start,
+    beginPreflight,
+    confirmStart,
     pause,
     resume,
     stop,
