@@ -112,6 +112,17 @@ async function flush() {
   })
 }
 
+async function confirmPreflight() {
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: '确认开拍' }))
+    await Promise.resolve()
+    await Promise.resolve()
+  })
+  return FakeMediaRecorder.instances[
+    FakeMediaRecorder.instances.length - 1
+  ]
+}
+
 function cameraSelect(): HTMLSelectElement {
   return document.querySelector(
     'select[data-device-kind="videoinput"]',
@@ -196,7 +207,7 @@ describe('设备枚举与热插拔（UI）', () => {
     })
 
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: '开始 take' }))
+      fireEvent.click(screen.getByRole('button', { name: '申请预检' }))
     })
     expect(g.pending).toHaveLength(1)
     expect(cameraSelect().disabled).toBe(true)
@@ -264,13 +275,13 @@ describe('设备枚举与热插拔（UI）', () => {
 
     // 用自动落到的 cam1 拍一条
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: '开始 take' }))
+      fireEvent.click(screen.getByRole('button', { name: '申请预检' }))
     })
     await act(async () => {
       g.grant()
       await Promise.resolve()
     })
-    const rec = FakeMediaRecorder.instances[0]
+    const rec = await confirmPreflight()
     // 录制中再拔掉 mic1：本次锁定显示 mic1，不漂移
     act(() => g.emitDeviceChange())
     await act(async () => {
@@ -317,8 +328,13 @@ describe('设备枚举与热插拔（UI）', () => {
         fireEvent.click(screen.getByRole('radio', { name: new RegExp(modeName) }))
       })
       await act(async () => {
-        fireEvent.click(screen.getByRole('button', { name: '开始 take' }))
+        fireEvent.click(screen.getByRole('button', { name: '申请预检' }))
         g.grant()
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: '确认开拍' }))
         await Promise.resolve()
         await Promise.resolve()
       })
@@ -417,10 +433,10 @@ describe('设备枚举与热插拔（UI）', () => {
     })
 
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: '开始 take' }))
+      fireEvent.click(screen.getByRole('button', { name: '申请预检' }))
     })
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: '取消本次开拍' }))
+      fireEvent.click(screen.getByRole('button', { name: '取消预检' }))
     })
     expect(cameraSelect().disabled).toBe(false)
     expect(document.querySelectorAll('.take-card')).toHaveLength(0)

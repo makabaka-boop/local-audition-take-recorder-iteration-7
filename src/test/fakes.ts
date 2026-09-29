@@ -107,7 +107,7 @@ export class FakeMediaRecorder implements MediaRecorderLike {
   stopCalls = 0
 
   constructor(
-    _stream: MediaStreamLike,
+    readonly stream: MediaStreamLike,
     options?: { mimeType?: string },
   ) {
     if (FakeMediaRecorder.ctorThrows) throw FakeMediaRecorder.ctorThrows

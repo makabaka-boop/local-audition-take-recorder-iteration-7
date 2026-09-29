@@ -92,7 +92,6 @@ export function useAuditionRecorder() {
    * 所选/列表 Take.markers 提供，切换 take 自然各带各的标记。
    */
   const [liveMarkers, setLiveMarkers] = useState<TakeMarker[]>([])
-
   const recorderRef = useRef<CaptureRecorder | null>(null)
   // take 列表镜像：卸载时批量 revoke，避免依赖 state 闭包过期
   const takesRef = useRef<Take[]>([])
@@ -222,15 +221,17 @@ export function useAuditionRecorder() {
       {
         onStatusChange: (next) => {
           setStatus(next)
-          // 冻结中的模式/MIME/流随状态同步：starting 即冻结，idle 即解锁
+          // 冻结中的模式/MIME/流随状态同步：预检/starting 即冻结，idle 即解锁
           setActiveMode(recorder.getActiveMode())
           setActiveMimeType(recorder.getActiveMimeType())
           setActiveVideoDevice(recorder.getActiveVideoDevice())
           setActiveAudioDevice(recorder.getActiveAudioDevice())
           setLiveStream((recorder.getActiveStream() as MediaStream | null) ?? null)
-          // 标记按会话存活：新会话开拍或落定回 idle 都必须清空实时镜像，
+          // 标记按会话存活：新预检/开拍或落定回 idle 都必须清空实时镜像，
           // 旧会话迟到的 onMarker 不可能残留到新 take 的界面上。
-          if (next === 'starting' || next === 'idle') setLiveMarkers([])
+          if (next !== 'recording' && next !== 'paused' && next !== 'stopping') {
+            setLiveMarkers([])
+          }
         },
         onTake: (take) => {
           takesRef.current = [...takesRef.current, take]
@@ -273,17 +274,41 @@ export function useAuditionRecorder() {
     }
   }, [refreshDevices])
 
+  /**
+   * 进入开拍预检：只申请一次设备，取得的流先用于预览/输入反馈。
+   * 模式、MIME、设备 id 与展示名在此刻冻结；确认开拍时复用同一条流。
+   */
+  const beginPreflight = useCallback(() => {
+    const recorder = recorderRef.current
+    if (!recorder || recorder.getStatus() !== 'idle') return
+    setError(null)
+    recorder.beginPreflight({
+      mode,
+      videoDeviceId: videoIdRef.current,
+      audioDeviceId: audioIdRef.current,
+      videoDeviceLabel: videoLabelRef.current,
+      audioDeviceLabel: audioLabelRef.current,
+    })
+  }, [mode])
+
+  /** 确认预检：把同一条 MediaStream 的所有权交给录制器，不再请求设备 */
+  const confirmStart = useCallback(() => {
+    const recorder = recorderRef.current
+    if (!recorder) return
+    recorder.confirmStart()
+  }, [])
+
+  /** 取消预检；权限晚到时由内核会话代次守卫释放旧流，不产生 take/错误 */
+  const cancelPreflight = useCallback(() => {
+    setError(null)
+    recorderRef.current?.stop()
+  }, [])
+
+  /** 兼容旧测试/调用方的直接开拍；UI 使用 beginPreflight + confirmStart */
   const start = useCallback(() => {
     const recorder = recorderRef.current
     if (!recorder || recorder.getStatus() !== 'idle') return
     setError(null)
-    // 绝不在开拍前清空既有成片：授权被拒 / 录制器初始化或启动失败时，
-    // 已有的 take 及其交付版选择必须原样保留（新成片由 onTake 追加）。
-    //
-    // 取流统一由内核负责：进入 start 的同一拍即切到 starting 并冻结
-    // 模式、MIME 与相关设备（含展示名），随后才申请权限；等待授权期间
-    // 重复 start 被内核的状态守卫挡下，模式/设备切换与迟到枚举也改不动
-    // 已冻结的计划。
     recorder.start({
       mode,
       videoDeviceId: videoIdRef.current,
@@ -331,10 +356,13 @@ export function useAuditionRecorder() {
   }, [])
 
   const isIdle = status === 'idle'
+  const isPreflight =
+    status === 'preflight-requesting' || status === 'preflight-ready'
   const canSwitchDevice = isIdle
-  // 当前所选模式有可用 MIME 才允许开拍；冻结期间（starting…）按钮同样禁用
+  // 当前所选模式有可用 MIME 才允许发起预检；预检与录制期间按钮禁用
   const canStart = isIdle && mimeByMode[mode] !== null
-  // 瞬间标记只在录制中可写入：暂停/等待权限/停止中/已结束一律禁用入口
+  const canConfirmPreflight = status === 'preflight-ready'
+  // 瞬间标记只在录制中可写入：预检/暂停/等待权限/停止中/已结束一律禁用入口
   const canMark = status === 'recording'
   const selectedTake = takes.find((t) => t.id === selectedTakeId) ?? null
 
@@ -393,11 +421,16 @@ export function useAuditionRecorder() {
     selectTake,
     deleteTake,
     error,
+    isPreflight,
     canStart,
+    canConfirmPreflight,
     canSwitchDevice,
     canMark,
     liveMarkers,
     liveStream,
+    beginPreflight,
+    confirmStart,
+    cancelPreflight,
     start,
     pause,
     resume,

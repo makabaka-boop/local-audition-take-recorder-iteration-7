@@ -77,6 +77,55 @@ body {
   justify-content: center;
   color: var(--muted);
   font-size: 14px;
+  padding: 20px;
+  text-align: center;
+}
+
+.input-feedback {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.62);
+  font-size: 12px;
+}
+
+.input-feedback-label {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.input-meter {
+  flex: 1;
+  height: 7px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.16);
+  overflow: hidden;
+}
+
+.input-meter-bar {
+  display: block;
+  width: 0;
+  height: 100%;
+  min-width: 4px;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--ok), var(--warn), var(--danger));
+  transition: width 80ms linear;
+}
+
+.input-track-state[data-track-state='live'] {
+  color: var(--ok);
+  white-space: nowrap;
+}
+
+.input-track-state[data-track-state='ended'] {
+  color: var(--danger);
+  white-space: nowrap;
 }
 
 .status-badge {
@@ -108,9 +157,15 @@ body {
   background: var(--warn);
 }
 
+.status-preflight-requesting .status-dot,
+.status-preflight-ready .status-dot,
 .status-starting .status-dot,
 .status-stopping .status-dot {
   background: var(--accent);
+}
+
+.status-preflight-ready .status-dot {
+  background: var(--ok);
 }
 
 @keyframes pulse {

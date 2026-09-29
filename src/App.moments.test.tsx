@@ -90,11 +90,15 @@ function addMarkerByUi(label: string) {
 
 async function clickStart(g?: ReturnType<typeof installGlobals>) {
   await act(async () => {
-    fireEvent.click(screen.getByRole('button', { name: '开始 take' }))
+    fireEvent.click(screen.getByRole('button', { name: '申请预检' }))
     if (g) {
       g.grant()
-      await Promise.resolve()
     }
+    await Promise.resolve()
+    await Promise.resolve()
+  })
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: '确认开拍' }))
     await Promise.resolve()
     await Promise.resolve()
   })
@@ -216,7 +220,7 @@ describe('瞬间标记页面', () => {
     expect(playSpy.mock.calls.length - playCallsBeforeMarkers).toBe(3)
   })
 
-  it('idle / starting / stopping 均明确不可标记，入口禁用且不产生标记', async () => {
+  it('idle / 预检 / stopping 均明确不可标记，入口禁用且不产生标记', async () => {
     vi.useRealTimers()
     vi.unstubAllGlobals()
     const g = installGlobals({ manualPermissions: true })
@@ -227,14 +231,23 @@ describe('瞬间标记页面', () => {
     ).toBeTruthy()
 
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: '开始 take' }))
+      fireEvent.click(screen.getByRole('button', { name: '申请预检' }))
     })
     expect(markerInput().disabled).toBe(true)
     expect(
-      screen.getByText('正在等待设备授权，授权后开始录制才可打标记。'),
+      screen.getByText('正在申请开拍预检，确认画面和声音正常后开始录制才可打标记。'),
     ).toBeTruthy()
 
-    const rec = await clickStart(g)
+    await act(async () => {
+      g.grant()
+      await Promise.resolve()
+    })
+    expect(markerInput().disabled).toBe(true)
+    expect(
+      screen.getByText('预检尚未开拍；确认画面和声音正常后点击“确认开拍”。'),
+    ).toBeTruthy()
+
+    const rec = await clickStart()
 
     act(() => rec.emitData(['d']))
     fireEvent.click(screen.getByRole('button', { name: '停止' }))

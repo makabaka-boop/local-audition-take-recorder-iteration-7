@@ -12,6 +12,8 @@ import {
 
 const STATUS_TEXT: Record<RecorderStatus, string> = {
   idle: '空闲',
+  'preflight-requesting': '正在申请预检设备…',
+  'preflight-ready': '预检就绪',
   starting: '正在请求设备…',
   recording: '录制中',
   paused: '已暂停',
@@ -95,6 +97,8 @@ function formatMarkerTime(ms: number): string {
 
 /** 非录制状态下“为什么此刻不能打标记”的明确提示（与内核拒绝文案呼应） */
 const MARKER_BLOCKED_HINT: Partial<Record<RecorderStatus, string>> = {
+  'preflight-requesting': '正在申请开拍预检，确认画面和声音正常后开始录制才可打标记。',
+  'preflight-ready': '预检尚未开拍；确认画面和声音正常后点击“确认开拍”。',
   starting: '正在等待设备授权，授权后开始录制才可打标记。',
   paused: '已暂停，不能打标记；继续录制后再标记。',
   stopping: '正在收尾停止，标记已随本 take 冻结。',
@@ -130,6 +134,91 @@ function Preview({ stream }: { stream: MediaStream | null }) {
       playsInline
       autoPlay
     />
+  )
+}
+
+function AudioInputFeedback({ stream }: { stream: MediaStream | null }) {
+  const barRef = useRef<HTMLSpanElement>(null)
+  const audioTracks = stream
+    ? stream
+        .getTracks()
+        .filter((track) => track.kind === 'audio')
+    : []
+
+  useEffect(() => {
+    if (!stream || audioTracks.length === 0) return
+    const AudioContextCtor =
+      window.AudioContext ??
+      (window as unknown as { webkitAudioContext?: typeof AudioContext })
+        .webkitAudioContext
+    if (!AudioContextCtor || !barRef.current) return
+
+    let cancelled = false
+    let context: AudioContext | null = null
+    let source: MediaStreamAudioSourceNode | null = null
+    let raf = 0
+
+    try {
+      context = new AudioContextCtor()
+      source = context.createMediaStreamSource(stream)
+      const analyser = context.createAnalyser()
+      analyser.fftSize = 256
+      source.connect(analyser)
+      const values = new Uint8Array(analyser.frequencyBinCount)
+
+      const tick = () => {
+        if (cancelled || !barRef.current) return
+        analyser.getByteTimeDomainData(values)
+        let peak = 0
+        for (const value of values) {
+          peak = Math.max(peak, Math.abs(value - 128) / 128)
+        }
+        barRef.current.style.width = `${Math.min(100, Math.round(peak * 140))}%`
+        raf = requestAnimationFrame(tick)
+      }
+      void context.resume?.().catch(() => undefined)
+      raf = requestAnimationFrame(tick)
+    } catch {
+      // jsdom 或个别安全限制无法建分析图：轨道状态仍提供输入反馈
+    }
+
+    return () => {
+      cancelled = true
+      cancelAnimationFrame(raf)
+      source?.disconnect()
+      void context?.close?.().catch(() => undefined)
+    }
+  }, [stream, audioTracks.length])
+
+  if (audioTracks.length === 0) {
+    return (
+      <div className="input-feedback" data-input-feedback="none" aria-live="polite">
+        未检测到麦克风轨道，请取消预检后重新选择设备。
+      </div>
+    )
+  }
+
+  return (
+    <div className="input-feedback" data-input-feedback="audio" aria-live="polite">
+      <span className="input-feedback-label">麦克风输入</span>
+      <span
+        className="input-meter"
+        data-audio-meter
+        aria-label="麦克风实时音量"
+      >
+        <span ref={barRef} className="input-meter-bar" />
+      </span>
+      {audioTracks.map((track, index) => (
+        <span
+          key={track.id || `audio-${index}`}
+          className="input-track-state"
+          data-track-kind="audio"
+          data-track-state={track.readyState}
+        >
+          {track.readyState === 'live' ? '输入正常' : '轨道已结束'}
+        </span>
+      ))}
+    </div>
   )
 }
 
@@ -383,11 +472,14 @@ export default function App() {
     deleteTake,
     error,
     canStart,
+    canConfirmPreflight,
     canSwitchDevice,
     canMark,
     liveMarkers,
     liveStream,
-    start,
+    beginPreflight,
+    confirmStart,
+    cancelPreflight,
     pause,
     resume,
     stop,
@@ -422,6 +514,16 @@ export default function App() {
       : displayMode === 'video-only'
         ? '正在请求摄像头…'
         : '正在请求摄像头与麦克风…'
+  const preflightText =
+    displayMode === 'audio-only'
+      ? '正在预检麦克风…'
+      : displayMode === 'video-only'
+        ? '正在预检摄像头…'
+        : '正在预检摄像头与麦克风…'
+  const isLivePreview = Boolean(liveStream) && needsVideo
+  const videoTrackStates = liveStream
+    ? liveStream.getTracks().filter((track) => track.kind === 'video')
+    : []
 
   return (
     <main className="app">
@@ -434,17 +536,38 @@ export default function App() {
 
       <section className="stage" aria-label="采集区">
         <div className="preview-wrap">
-          {liveStream && needsVideo ? (
+          {isLivePreview ? (
             <Preview stream={liveStream} />
           ) : (
             <div className="preview placeholder">
-              {status === 'starting'
-                ? startingText
-                : displayMode === 'audio-only'
-                  ? '仅音频模式：授权后开始采集声音'
-                  : '授权后开始采集画面'}
+              {status === 'preflight-requesting'
+                ? preflightText
+                : status === 'starting'
+                  ? startingText
+                  : status === 'preflight-ready' && displayMode === 'audio-only'
+                    ? '麦克风预检就绪，请观察输入反馈'
+                    : displayMode === 'audio-only'
+                      ? '仅音频模式：预检后确认声音输入'
+                      : '先申请预检，确认画面正常后再开拍'}
             </div>
           )}
+          {status === 'preflight-ready' && needsVideo && liveStream && (
+            <div className="input-feedback" data-input-feedback="video" aria-live="polite">
+              {videoTrackStates.map((track, index) => (
+                <span
+                  key={track.id || `video-${index}`}
+                  className="input-track-state"
+                  data-track-kind="video"
+                  data-track-state={track.readyState}
+                >
+                  摄像头 {track.readyState === 'live' ? '画面正常' : '轨道已结束'}
+                </span>
+              ))}
+            </div>
+          )}
+          {needsAudio &&
+            (status === 'preflight-ready' || status === 'recording' || status === 'paused') &&
+            liveStream && <AudioInputFeedback stream={liveStream} />}
           <div className={`status-badge status-${status}`}>
             <span className="status-dot" />
             {STATUS_TEXT[status]}
@@ -480,7 +603,11 @@ export default function App() {
               })}
             </div>
             {!canSwitchDevice && (
-              <p className="hint">模式已随开拍冻结；停止后才可切换。</p>
+              <p className="hint">
+                {status === 'preflight-requesting' || status === 'preflight-ready'
+                  ? '预检已冻结模式；如需更换，请先取消预检。'
+                  : '模式已随开拍冻结；停止后才可切换。'}
+              </p>
             )}
           </fieldset>
 
@@ -551,7 +678,12 @@ export default function App() {
 
           {!canSwitchDevice && (
             <div className="locked-devices" data-locked-devices>
-              <p className="hint">录制进行中，设备已锁定；停止后才可切换。</p>
+              <p className="hint">
+                {status === 'preflight-requesting' ||
+                status === 'preflight-ready'
+                  ? '预检进行中，设备已锁定；修改设备须先取消预检并重新申请。'
+                  : '录制进行中，设备已锁定；停止后才可切换。'}
+              </p>
               <p className="locked-device-line">
                 本次实际采集：
                 {needsVideo && (
@@ -583,10 +715,18 @@ export default function App() {
             <button
               type="button"
               className="btn btn-start"
-              onClick={() => start()}
+              onClick={beginPreflight}
               disabled={!canStart}
             >
-              开始 take
+              申请预检
+            </button>
+            <button
+              type="button"
+              className="btn btn-confirm"
+              onClick={confirmStart}
+              disabled={!canConfirmPreflight}
+            >
+              确认开拍
             </button>
             <button
               type="button"
@@ -607,13 +747,30 @@ export default function App() {
             <button
               type="button"
               className="btn btn-stop"
-              onClick={stop}
+              onClick={
+                status === 'preflight-requesting' ||
+                status === 'preflight-ready'
+                  ? cancelPreflight
+                  : stop
+              }
               disabled={
                 status === 'idle' || status === 'stopping'
               }
-              aria-label={status === 'starting' ? '取消本次开拍' : '停止'}
+              aria-label={
+                status === 'preflight-requesting' ||
+                status === 'preflight-ready'
+                  ? '取消预检'
+                  : status === 'starting'
+                    ? '取消本次开拍'
+                    : '停止'
+              }
             >
-              {status === 'starting' ? '取消' : '停止'}
+              {status === 'preflight-requesting' ||
+              status === 'preflight-ready'
+                ? '取消预检'
+                : status === 'starting'
+                  ? '取消'
+                  : '停止'}
             </button>
           </div>
 
